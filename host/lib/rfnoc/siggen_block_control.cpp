@@ -19,8 +19,7 @@
 using namespace uhd::rfnoc;
 
 
-// Register offsets
-const uint32_t siggen_block_control::REG_BLOCK_SIZE       = 1 << 5;
+const uint32_t siggen_block_control::REG_BLOCK_SIZE       = 1 << 6;
 const uint32_t siggen_block_control::REG_ENABLE_OFFSET    = 0x00;
 const uint32_t siggen_block_control::REG_SPP_OFFSET       = 0x04;
 const uint32_t siggen_block_control::REG_WAVEFORM_OFFSET  = 0x08;
@@ -28,6 +27,19 @@ const uint32_t siggen_block_control::REG_GAIN_OFFSET      = 0x0C;
 const uint32_t siggen_block_control::REG_CONSTANT_OFFSET  = 0x10;
 const uint32_t siggen_block_control::REG_PHASE_INC_OFFSET = 0x14;
 const uint32_t siggen_block_control::REG_CARTESIAN_OFFSET = 0x18;
+const uint32_t siggen_block_control::REG_THRESHOLD_OFFSET  = 0x1C;
+const uint32_t siggen_block_control::REG_PULSEWIDTH_OFFSET = 0x20;
+const uint32_t siggen_block_control::REG_DELAY_OFFSET       = 0x24;
+const uint32_t siggen_block_control::REG_HOLDCOUNT_OFFSET   = 0x28;
+
+// 🔽 NEW debug layout, matching the Verilog .vh (all ≤ 0x3F)
+const uint32_t siggen_block_control::REG_DBG_FLAGS_OFFSET     = 0x2C; // dbg_ts_seen, etc.
+const uint32_t siggen_block_control::REG_DBG_CTRL_OFFSET      = 0x30; // clear
+const uint32_t siggen_block_control::REG_DBG_STATUS_OFFSET    = 0x34; // sticky+live bits
+const uint32_t siggen_block_control::REG_DBG_TS_NOW_LO_OFFSET = 0x38; // dbg_ts_now_trig[31:0]
+const uint32_t siggen_block_control::REG_DBG_TS_NOW_HI_OFFSET = 0x3C; // dbg_ts_now_trig[63:32]
+
+
 
 // User property names
 const char* const PROP_KEY_ENABLE         = "enable";
@@ -36,6 +48,10 @@ const char* const PROP_KEY_AMPLITUDE      = "amplitude";
 const char* const PROP_KEY_CONSTANT_I     = "constant_i";
 const char* const PROP_KEY_CONSTANT_Q     = "constant_q";
 const char* const PROP_KEY_SINE_PHASE_INC = "sine_phase_increment";
+const char* const PROP_KEY_THRESHOLD         = "threshold";
+const char* const PROP_KEY_PULSEWIDTH       = "pulsewidth";
+const char* const PROP_KEY_DELAY          = "delay";
+const char* const PROP_KEY_HOLDCOUNT      = "holdcount";
 
 namespace {
 template <class T>
@@ -117,6 +133,83 @@ public:
     {
         return _prop_spp.at(port).get();
     }
+    
+    
+    
+        void set_threshold(const double threshold, const size_t port) override
+    {
+        set_property<double>(PROP_KEY_THRESHOLD, threshold, port);
+    }
+
+    double get_threshold(const size_t port) const override
+    {
+        return _prop_threshold.at(port).get();
+    }
+    
+    
+    
+    
+        void set_delay(const double delay, const size_t port) override
+    {
+        set_property<double>(PROP_KEY_DELAY, delay, port);
+    }
+
+    double get_delay(const size_t port) const override
+    {
+        return _prop_delay.at(port).get();
+    }
+    
+    
+        void set_pulsewidth(const double pulsewidth, const size_t port) override
+    {
+        set_property<double>(PROP_KEY_PULSEWIDTH, pulsewidth, port);
+    }
+
+    double get_pulsewidth(const size_t port) const override
+    {
+        return _prop_pulsewidth.at(port).get();
+    }
+    
+    
+    uint32_t get_dbg_status(const size_t port = 0) override
+{
+    return _siggen_reg_iface.peek32(REG_DBG_STATUS_OFFSET, port);
+}
+
+    
+    // setters/getters:
+void set_holdcount(const size_t holdcount, const size_t port) override {
+    set_property<int>(PROP_KEY_HOLDCOUNT, int(holdcount), port);
+}
+size_t get_holdcount(const size_t port) const override {
+    return size_t(_prop_holdcount.at(port).get());
+}
+
+    // -------------------- DEBUG helpers --------------------
+    void clear_debug(const size_t port) override
+    {
+        _siggen_reg_iface.poke32(REG_DBG_CTRL_OFFSET, 0x1, port);
+    }
+
+    bool get_ts_seen(const size_t port) override
+    {
+        const uint32_t flags =
+            _siggen_reg_iface.peek32(REG_DBG_FLAGS_OFFSET, port);
+        return (flags & 0x1) != 0;
+    }
+
+
+
+    uint64_t get_trigger_timestamp(const size_t port) override
+    {
+        const uint32_t lo =
+            _siggen_reg_iface.peek32(REG_DBG_TS_NOW_LO_OFFSET, port);
+        const uint32_t hi =
+            _siggen_reg_iface.peek32(REG_DBG_TS_NOW_HI_OFFSET, port);
+        return (uint64_t(hi) << 32) | uint64_t(lo);
+    }
+
+
 
     /**************************************************************************
      * Initialization
@@ -133,6 +226,12 @@ private:
         _prop_phase_inc.reserve(num_outputs);
         _prop_spp.reserve(num_outputs);
         _prop_type_out.reserve(num_outputs);
+_prop_threshold.reserve(num_outputs);
+_prop_pulsewidth.reserve(num_outputs);
+_prop_delay.reserve(num_outputs);
+_prop_holdcount.reserve(num_outputs);
+
+
 
         for (size_t port = 0; port < num_outputs; port++) {
             // register edge properties
@@ -154,6 +253,7 @@ private:
                 PROP_KEY_CONSTANT_Q, 1.0, {res_source_info::USER, port}});
             _prop_phase_inc.emplace_back(property_t<double>{
                 PROP_KEY_SINE_PHASE_INC, 1.0, {res_source_info::USER, port}});
+
             const int default_spp =
                 static_cast<int>(
                     get_max_payload_size({res_source_info::OUTPUT_EDGE, port}))
@@ -198,6 +298,39 @@ private:
                     "Setting samples per packet to " << spp << " on port " << port);
                 _siggen_reg_iface.poke32(REG_SPP_OFFSET, spp, port);
             });
+            
+						_prop_threshold.emplace_back(property_t<double>{
+				PROP_KEY_THRESHOLD, 0.0, {res_source_info::USER, port}});
+			register_property(&_prop_threshold.back(), [this, port]() {
+				// raw SC16 magnitude 0..32767
+				const double v = _prop_threshold.at(port).get();
+				const uint16_t thr = clamp<uint16_t>(v);
+				_siggen_reg_iface.poke32(REG_THRESHOLD_OFFSET, uint32_t(thr), port);
+			});
+
+			_prop_pulsewidth.emplace_back(property_t<double>{
+				PROP_KEY_PULSEWIDTH, 0.0, {res_source_info::USER, port}});
+			register_property(&_prop_pulsewidth.back(), [this, port]() {
+				// samples (0..65535). 0 means “don’t burst”.
+				const double v = _prop_pulsewidth.at(port).get();
+				const uint16_t pw = clamp<uint16_t>(v);
+				_siggen_reg_iface.poke32(REG_PULSEWIDTH_OFFSET, uint32_t(pw), port);
+			});
+
+			_prop_delay.emplace_back(property_t<double>{
+				PROP_KEY_DELAY, 0.0, {res_source_info::USER, port}});
+			register_property(&_prop_delay.back(), [this, port]() {
+				// ce_clk cycles (0..0xFFFFFFFF)
+				const double v = _prop_delay.at(port).get();
+				const uint32_t dly = (v < 0.0) ? 0u : uint32_t(v);
+				_siggen_reg_iface.poke32(REG_DELAY_OFFSET, dly, port);
+			});
+            
+            _prop_holdcount.emplace_back(property_t<int>{PROP_KEY_HOLDCOUNT, 0, {res_source_info::USER, port}});
+register_property(&_prop_holdcount.back(), [this, port]() {
+    int w = _prop_holdcount.at(port).get();
+    _siggen_reg_iface.poke32(REG_HOLDCOUNT_OFFSET, uint32_t(w), port);
+});
 
             add_property_resolver({&_prop_waveform.back(), &_prop_amplitude.back()},
                 {&_prop_amplitude.back()},
@@ -332,6 +465,11 @@ private:
     std::vector<property_t<double>> _prop_phase_inc;
     std::vector<property_t<int>> _prop_spp;
     std::vector<property_t<std::string>> _prop_type_out;
+    std::vector<property_t<double>> _prop_threshold;
+    std::vector<property_t<double>> _prop_pulsewidth;
+    std::vector<property_t<double>> _prop_delay;
+    std::vector<property_t<int>> _prop_holdcount;
+
 
     /**************************************************************************
      * Register interface

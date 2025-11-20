@@ -38,6 +38,17 @@ public:
     static const uint32_t REG_CONSTANT_OFFSET;
     static const uint32_t REG_PHASE_INC_OFFSET;
     static const uint32_t REG_CARTESIAN_OFFSET;
+// NEW: Trigger/Delay/Burst registers
+static const uint32_t REG_THRESHOLD_OFFSET;   // 0x1C
+static const uint32_t REG_PULSEWIDTH_OFFSET;  // 0x20
+static const uint32_t REG_DELAY_OFFSET;       // 0x24
+static const uint32_t REG_HOLDCOUNT_OFFSET;
+    // Debug CSRs (all inside 0x00..0x3F)
+    static const uint32_t REG_DBG_FLAGS_OFFSET;     // 0x2C
+    static const uint32_t REG_DBG_CTRL_OFFSET;      // 0x30
+    static const uint32_t REG_DBG_STATUS_OFFSET;    // 0x34
+    static const uint32_t REG_DBG_TS_NOW_LO_OFFSET; // 0x38
+    static const uint32_t REG_DBG_TS_NOW_HI_OFFSET; // 0x3C
 
     /*! Set the function generator stream enable flag
      *
@@ -188,7 +199,35 @@ public:
      * \param frequency The desired frequency of the sinusoid
      * \param sample_rate The assumed sample rate
      * \param port The port on the block whose phase increment to set
+     
      */
+     
+     // NEW: Trigger threshold (raw SC16 magnitude, 0..32767)
+virtual void   set_threshold(const double threshold, const size_t port) = 0;
+virtual double get_threshold(const size_t port) const = 0;
+
+// NEW: Pulse width in samples (0..65535)
+virtual void   set_pulsewidth(const double pulsewidth, const size_t port) = 0;
+virtual double get_pulsewidth(const size_t port) const = 0;
+
+// NEW: Delay in ce_clk cycles (0..0xFFFFFFFF)
+virtual void   set_delay(const double delay, const size_t port) = 0;
+virtual double get_delay(const size_t port) const = 0;
+
+// siggen_block_control.hpp (public API)
+virtual void set_holdcount(const size_t warmup, const size_t port) = 0;
+virtual size_t get_holdcount(const size_t port) const = 0;
+
+
+
+    // ---------------- DEBUG timestamp helpers ----------------
+    // Clear debug state (dbg_clear in RTL)
+virtual void     clear_debug(const size_t port = 0) = 0;
+virtual bool     get_ts_seen(const size_t port = 0) = 0;
+virtual uint64_t get_trigger_timestamp(const size_t port = 0) = 0;
+// NEW: read DBG_STATUS CSR (REG_DBG_STATUS)
+virtual uint32_t get_dbg_status(const size_t port = 0) = 0;
+
     inline void set_sine_frequency(
         const double frequency, const double sample_rate, const size_t port)
     {

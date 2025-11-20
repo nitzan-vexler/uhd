@@ -85,6 +85,21 @@ module noc_shell_siggen #(
   // AXI-Stream Data Clock and Reset
   output wire               axis_data_clk,
   output wire               axis_data_rst,
+  
+    
+   // Data Stream to User Logic: in
+  output  wire [NUM_PORTS*32*1-1:0]   s_in_axis_tdata,
+  output  wire [NUM_PORTS*1-1:0]      s_in_axis_tkeep,
+  output  wire [NUM_PORTS-1:0]        s_in_axis_tlast,
+  output  wire [NUM_PORTS-1:0]        s_in_axis_tvalid,
+  input wire [NUM_PORTS-1:0]        s_in_axis_tready,
+  output  wire [NUM_PORTS*64-1:0]     s_in_axis_ttimestamp,
+  output  wire [NUM_PORTS-1:0]        s_in_axis_thas_time,
+  output  wire [NUM_PORTS*16-1:0]     s_in_axis_tlength,
+  output  wire [NUM_PORTS-1:0]        s_in_axis_teov,
+  output  wire [NUM_PORTS-1:0]        s_in_axis_teob,
+
+
   // Data Stream from User Logic: out
   input  wire [NUM_PORTS*32*1-1:0]   s_out_axis_tdata,
   input  wire [NUM_PORTS*1-1:0]      s_out_axis_tkeep,
@@ -214,9 +229,53 @@ module noc_shell_siggen #(
   // Input Data Paths
   //---------------------
 
-  // No input data paths for this block
-  assign s_rfnoc_chdr_tready[0] = 1'b1;
-  assign data_i_flush_done[0] = 1'b1;
+//---------------------
+// Input Data Paths
+//---------------------
+// ---------------------
+// Input Data Path (CHDR -> AXIS for user logic)
+// ---------------------
+chdr_to_axis_data #(
+  .CHDR_W         (CHDR_W),
+  .ITEM_W         (32),
+  .NIPC           (1),
+  .SYNC_CLKS      (0),
+  .INFO_FIFO_SIZE ($clog2(32)),
+  .PYLD_FIFO_SIZE ($clog2(32))
+) chdr_to_axis_data_in (
+  // clocks & resets
+  .axis_chdr_clk     (rfnoc_chdr_clk),
+  .axis_chdr_rst     (rfnoc_chdr_rst),
+  .axis_data_clk     (axis_data_clk),   // or axis_data_clk_s if that's your wire
+  .axis_data_rst     (axis_data_rst),   // or axis_data_rst_s if that's your wire
+
+  // CHDR from framework
+  .s_axis_chdr_tdata (s_rfnoc_chdr_tdata[CHDR_W*0 +: CHDR_W]),
+  .s_axis_chdr_tlast (s_rfnoc_chdr_tlast[0]),
+  .s_axis_chdr_tvalid(s_rfnoc_chdr_tvalid[0]),
+  .s_axis_chdr_tready(s_rfnoc_chdr_tready[0]),
+
+  // AXIS into your core
+  .m_axis_tdata      (s_in_axis_tdata     [32*1*0 +: 32*1]),
+  .m_axis_tkeep      (s_in_axis_tkeep     [1*0 +: 1]),
+  .m_axis_tlast      (s_in_axis_tlast     [0]),
+  .m_axis_tvalid     (s_in_axis_tvalid    [0]),
+  .m_axis_tready     (s_in_axis_tready    [0]),
+
+  // sideband to your core
+  .m_axis_ttimestamp (s_in_axis_ttimestamp[64*0 +: 64]),
+  .m_axis_thas_time  (s_in_axis_thas_time [0]),
+  .m_axis_tlength    (s_in_axis_tlength   [16*0 +: 16]),
+  .m_axis_teov       (s_in_axis_teov      [0]),
+  .m_axis_teob       (s_in_axis_teob      [0]),
+
+  // flush control from backend
+  .flush_en          (data_i_flush_en),
+  .flush_timeout     (data_i_flush_timeout),
+  .flush_active      (data_i_flush_active[0]),
+  .flush_done        (data_i_flush_done  [0])
+);
+
 
   //---------------------
   // Output Data Paths
