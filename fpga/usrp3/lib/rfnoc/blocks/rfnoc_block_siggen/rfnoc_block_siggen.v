@@ -67,7 +67,6 @@ module rfnoc_block_siggen #(
   `include "rfnoc_block_siggen_regs.vh"
 
 
-
   //---------------------------------------------------------------------------
   // Signal Declarations
   //---------------------------------------------------------------------------
@@ -101,6 +100,7 @@ module rfnoc_block_siggen #(
   wire [  NUM_PORTS*64-1:0] s_out_axis_ttimestamp;
   wire [     NUM_PORTS-1:0] s_out_axis_thas_time;
   wire [NUM_PORTS*1-1:0]      s_out_axis_tkeep;
+
 
 
   //---------------------------------------------------------------------------
@@ -248,65 +248,36 @@ wire axis_data_clk_s, axis_data_rst_s;
   // Port Instances
   //---------------------------------------------------------------------------
 
-genvar port;
-generate
-  for (port = 0; port < NUM_PORTS; port = port+1) begin : gen_ports
+  genvar port;
+  generate
+    for (port = 0; port < NUM_PORTS; port = port+1) begin : gen_ports
 
-    rfnoc_siggen_core #(
-      .CHDR_W(CHDR_W)
-    ) rfnoc_siggen_core_i (
-      .clk (axis_data_clk_s),
-      .rst (axis_data_rst_s),
-      .s_ctrlport_req_wr    (ctrlport_req_wr    [port* 1 +:  1]),
-      .s_ctrlport_req_rd    (ctrlport_req_rd    [port* 1 +:  1]),
-      .s_ctrlport_req_addr  (ctrlport_req_addr  [port*20 +: 20]),
-      .s_ctrlport_req_data  (ctrlport_req_data  [port*32 +: 32]),
-      .s_ctrlport_resp_ack  (ctrlport_resp_ack  [port* 1 +:  1]),
-      .s_ctrlport_resp_data (ctrlport_resp_data [port*32 +: 32]),
+      rfnoc_siggen_core rfnoc_siggen_core_i (
+        .clk                  (ctrlport_clk_s),
+        .rst                  (ctrlport_rst_s),
+        .s_ctrlport_req_wr    (ctrlport_req_wr    [port* 1 +:  1]),
+        .s_ctrlport_req_rd    (ctrlport_req_rd    [port* 1 +:  1]),
+        .s_ctrlport_req_addr  (ctrlport_req_addr  [port*20 +: 20]),
+        .s_ctrlport_req_data  (ctrlport_req_data  [port*32 +: 32]),
+        .s_ctrlport_resp_ack  (ctrlport_resp_ack  [port* 1 +:  1]),
+        .s_ctrlport_resp_data (ctrlport_resp_data [port*32 +: 32]),
+        
+              // NEW: input stream into the core
+        .s_tdata              (s_in_axis_tdata    [port*32 +: 32]),
+        .s_tvalid             (s_in_axis_tvalid   [port*1  +: 1 ]),
+        .s_tlast              (s_in_axis_tlast    [port*1  +: 1 ]),
+        .s_tready             (s_in_axis_tready   [port*1  +: 1 ]),
+        .s_tlength            (s_in_axis_tlength  [port*16 +: 16]),
+        
+        .m_tdata              (s_out_axis_tdata   [port*32 +: 32]),
+        .m_tlast              (s_out_axis_tlast   [port* 1 +:  1]),
+        .m_tvalid             (s_out_axis_tvalid  [port* 1 +:  1]),
+        .m_tready             (s_out_axis_tready  [port* 1 +:  1]),
+        .m_tlength            (s_out_axis_tlength [port*16 +: 16])
+      );
 
-      // Input stream from RX
-      .s_tdata              (s_in_axis_tdata    [port*32 +: 32]),
-      .s_tvalid             (s_in_axis_tvalid   [port*1  +: 1 ]),
-      .s_tlast              (s_in_axis_tlast    [port*1  +: 1 ]),
-      .s_tready             (s_in_axis_tready   [port*1  +: 1 ]),
-      .s_tlength            (s_in_axis_tlength  [port*16 +: 16]),
-      .s_ttimestamp         (s_in_axis_ttimestamp [port*64 +: 64]), // timestamp from upstream
-      .s_thas_time          (s_in_axis_thas_time  [port]),
-
-      // Output stream
-      .m_tdata              (s_out_axis_tdata   [port*32 +: 32]),
-      .m_tlast              (s_out_axis_tlast   [port* 1 +:  1]),
-      .m_tvalid             (s_out_axis_tvalid  [port* 1 +:  1]),
-      .m_tready             (s_out_axis_tready  [port* 1 +:  1]),
-      .m_tlength            (s_out_axis_tlength [port*16 +: 16]),
-
-      // Timestamp sideband for TX scheduling
-      .m_ttimestamp         (s_out_axis_ttimestamp [port*64 +: 64]),
-      .m_thas_time          (s_out_axis_thas_time  [port])
-    );
-
-  end
-endgenerate
-
-
-// ---------------- Verilog-2001 debug monitors ----------------
-reg [63:0] dbg_ts_in;
-reg        dbg_ts_in_seen;
-
-// capture core->shell timestamp at SOP
-always @(posedge axis_data_clk_s) begin
-  if (axis_data_rst_s) begin
-    dbg_ts_in_seen <= 1'b0;
-  end else if (s_out_axis_tvalid[0] && s_out_axis_tready[0] && s_out_axis_thas_time[0]) begin
-    dbg_ts_in       <= s_out_axis_ttimestamp[64*0 +: 64];
-    dbg_ts_in_seen  <= 1'b1;
-    $display("%0t [DBG SHELL IN]  ts_in=%0d", $time, s_out_axis_ttimestamp[64*0 +: 64]);
-  end
-end
-
-// if you can decode/print the CHDR header ts here, do it.
-// (If you can't access it directly, this still proves you're asserting has_time
-// at SOP and shows what you handed to the shell.)
+    end
+  endgenerate
 
 endmodule // rfnoc_block_siggen
 

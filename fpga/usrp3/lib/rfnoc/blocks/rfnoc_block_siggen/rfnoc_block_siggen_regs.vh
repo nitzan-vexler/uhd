@@ -78,7 +78,7 @@ localparam REG_GAIN_LEN = 16;
 // [31:16] X/I/Real component
 // [15: 0] Y/Q/Imaginary component
 
-localparam [19:0] REG_CONSTANT    = 20'h00010;
+localparam [19:0] REG_CONSTANT   = 20'h00010;
 //
 localparam REG_CONSTANT_LEN = 32;
 
@@ -151,33 +151,6 @@ localparam [19:0] REG_DELAY      = 20'h00024;  // <-- yes, 0x24 is correct
 localparam        REG_DELAY_LEN      = 32;
 
 // rfnoc_siggen_regs.vh (or wherever you define regs)
-localparam REG_HOLDCOUNT   = 'h28;
-localparam REG_HOLDCOUNT_LEN      = 8;       // up to 255 samples is plenty
-
-
-// ----------------------- DEBUG REGISTERS (0x2C-0x3C) ----------------------
-
-// 0x2C: debug flags - bit0 = dbg_ts_seen (sticky "we saw a timestamp/trigger")
-localparam [19:0] REG_DBG_FLAGS      = 20'h0002C;
-
-// 0x30: debug control - bit0 = dbg_clear (write 1 to clear all debug state)
-localparam [19:0] REG_DBG_CTRL       = 20'h00030;
-
-// 0x34: debug status - pack whatever live/sticky flags you want
-localparam [19:0] REG_DBG_STATUS     = 20'h00034;
-
-// 0x38: lower 32 bits of dbg_ts_now_trig (trigger time)
-localparam [19:0] REG_DBG_TS_NOW_LO  = 20'h00038;
-
-// 0x3C: upper 32 bits of dbg_ts_now_trig
-localparam [19:0] REG_DBG_TS_NOW_HI  = 20'h0003C;
-// ---------------------------------------------------------------------
-// Legacy aliases for testbench compatibility
-// The original TB expects REG_DBG_COUNTS and REG_DBG_SNAP0.
-// We alias them to existing debug regs so compilation succeeds.
-// ---------------------------------------------------------------------
-// Legacy aliases for TB compatibility
-localparam [19:0] REG_DBG_COUNTS = REG_DBG_TS_NOW_LO; // 0x00038
-localparam [19:0] REG_DBG_SNAP0  = REG_DBG_TS_NOW_HI; // 0x0003C
-
+localparam REG_WARMUP   = 'h28;
+localparam REG_WARMUP_LEN      = 8;       // up to 255 samples is plenty
 
