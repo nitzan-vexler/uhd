@@ -132,11 +132,11 @@ graph->commit();
 
 // Configure SigGen (example numbers)
 const size_t port = 0;
-const double tone_hz = 100e3;                 // 100 kHz tone
+const double tone_hz = 0;                 
 siggen->set_samples_per_packet(spp, port);
 siggen->set_waveform(uhd::rfnoc::siggen_waveform::SINE_WAVE, port);
 siggen->set_amplitude(0.5, port);             // 0.0 .. 1.0
-siggen->set_sine_phase_increment(2.0 * uhd::math::PI * (tone_hz / rate), port);
+siggen->set_sine_phase_increment(0, port);
 
 // Trigger gating (your new regs)
 siggen->set_threshold(threshold /*LSBs*/, port);   // pick based on RX magnitude
@@ -146,7 +146,7 @@ siggen->set_pulsewidth(pulsewidth /*samples*/, port);
     std::cout << "delay= " << siggen->get_delay(port) << " ce clk cycles " << std::endl;
     std::cout << "pulsewidth= " << siggen->get_pulsewidth(port) << " samples " << std::endl;
     std::cout << "threshold= " << siggen->get_threshold(port) << " LSBs " << std::endl;
-    std::cout << "holdcount= " << siggen->get_holdcount(port) << " samples for trigger " << std::endl;
+   // std::cout << "holdcount= " << siggen->get_holdcount(port) << " samples for trigger " << std::endl;
     
     
 
@@ -328,64 +328,64 @@ siggen->set_enable(true, port);
     std::cout << "Issuing start stream cmd..." << std::endl;
     rx_radio_ctrl->issue_stream_cmd(stream_cmd, rx_chan);
     std::cout << "Wait..." << std::endl;
-    siggen->clear_debug(port);
-std::this_thread::sleep_for(50ms);
+  //  siggen->clear_debug(port);
+//std::this_thread::sleep_for(50ms);
 
 // We assume you already have:
-auto tk = graph->get_mb_controller(rx_mb_idx)->get_timekeeper(rx_mb_idx);
-const double fr = tk->get_tick_rate();
+//auto tk = graph->get_mb_controller(rx_mb_idx)->get_timekeeper(rx_mb_idx);
+//const double fr = tk->get_tick_rate();
 
-siggen->clear_debug(port);
-std::this_thread::sleep_for(50ms);
+//siggen->clear_debug(port);
+//std::this_thread::sleep_for(50ms);
 
-bool saw_ts = false;
+//bool saw_ts = false;
 
 // poll a bit in case the trigger happens a bit later
-for (int i = 0; i < 100; i++) {
-    bool ts_seen = siggen->get_ts_seen(port);
-    std::cout << "[DEBUG] poll " << i << " ts_seen=" << ts_seen << std::endl;
+//for (int i = 0; i < 100; i++) {
+   // bool ts_seen = siggen->get_ts_seen(port);
+ //   std::cout << "[DEBUG] poll " << i << " ts_seen=" << ts_seen << std::endl;
 
-    if (ts_seen) {
-        // ---------------- Trigger timestamp from SigGen ----------------
-        auto trig_ticks = siggen->get_trigger_timestamp(port);
-        double trig_sec = trig_ticks / fr;
+   // if (ts_seen) {
+     //   // ---------------- Trigger timestamp from SigGen ----------------
+     //   auto trig_ticks = siggen->get_trigger_timestamp(port);
+      //  double trig_sec = trig_ticks / fr;
 
-        std::cout << "Trigger TS (ticks): " << trig_ticks << "\n";
-        std::cout << "Trigger TS (sec):   " << trig_sec   << "\n";
+      //  std::cout << "Trigger TS (ticks): " << trig_ticks << "\n";
+     //   std::cout << "Trigger TS (sec):   " << trig_sec   << "\n";
 
         // ---------------- Radio timekeeper "now" ----------------
-        auto now_ts   = tk->get_time_now();
-        double now_s  = now_ts.get_full_secs() + now_ts.get_frac_secs();
-        double now_ticks = now_s * fr;
+     //   auto now_ts   = tk->get_time_now();
+     //   double now_s  = now_ts.get_full_secs() + now_ts.get_frac_secs();
+     //   double now_ticks = now_s * fr;
 
-        std::cout << "Radio now (ticks):  " << static_cast<uint64_t>(now_ticks)
-                  << " (" << now_s << " s)\n";
-        std::cout << "Δ(now - trig) [ticks]: "
-                  << static_cast<int64_t>(now_ticks - trig_ticks) << "\n";
+      //  std::cout << "Radio now (ticks):  " << static_cast<uint64_t>(now_ticks)
+     //             << " (" << now_s << " s)\n";
+     //   std::cout << "Δ(now - trig) [ticks]: "
+     //             << static_cast<int64_t>(now_ticks - trig_ticks) << "\n";
 
         // ---------------- DBG_STATUS from FPGA core ----------------
-        uint32_t status = siggen->get_dbg_status(port);
+     //   uint32_t status = siggen->get_dbg_status(port);
 
-        std::cout << "DBG_STATUS = 0x" << std::hex << status << std::dec << "\n";
-        std::cout << "  trigger_seen      = " << ((status >> 0) & 0x1) << "\n";
-        std::cout << "  burst_start_seen  = " << ((status >> 1) & 0x1) << "\n";
-        std::cout << "  burst_active      = " << ((status >> 2) & 0x1) << "\n";
-        std::cout << "  output_seen       = " << ((status >> 3) & 0x1) << "\n";
-        std::cout << "  use_trigger       = " << ((status >> 4) & 0x1) << "\n";
-        std::cout << "  ready_to_output   = " << ((status >> 5) & 0x1) << "\n";
-        std::cout << "  gate_closed       = " << ((status >> 6) & 0x1) << "\n";
-        std::cout << "  allow_output      = " << ((status >> 7) & 0x1) << "\n";
+     //   std::cout << "DBG_STATUS = 0x" << std::hex << status << std::dec << "\n";
+     //   std::cout << "  trigger_seen      = " << ((status >> 0) & 0x1) << "\n";
+     //   std::cout << "  burst_start_seen  = " << ((status >> 1) & 0x1) << "\n";
+     //   std::cout << "  burst_active      = " << ((status >> 2) & 0x1) << "\n";
+    //    std::cout << "  output_seen       = " << ((status >> 3) & 0x1) << "\n";
+     //   std::cout << "  use_trigger       = " << ((status >> 4) & 0x1) << "\n";
+     //   std::cout << "  ready_to_output   = " << ((status >> 5) & 0x1) << "\n";
+     //   std::cout << "  gate_closed       = " << ((status >> 6) & 0x1) << "\n";
+     //   std::cout << "  allow_output      = " << ((status >> 7) & 0x1) << "\n";
 
-        saw_ts = true;
+      //  saw_ts = true;
        // break;   // only print once; remove if you want it every poll
-    }
+   // }
 
-    std::this_thread::sleep_for(10ms);
-}
+   // std::this_thread::sleep_for(10ms);
+//}
 
-if (!saw_ts) {
-    std::cout << "no trigger timestamp seen" << std::endl;
-}
+//if (!saw_ts) {
+  //  std::cout << "no trigger timestamp seen" << std::endl;
+//}
 
     // Wait until we can exit
     uhd::time_spec_t elapsed_time = 0.0;

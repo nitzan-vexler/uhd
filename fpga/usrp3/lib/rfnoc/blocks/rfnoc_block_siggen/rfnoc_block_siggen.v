@@ -253,8 +253,8 @@ wire axis_data_clk_s, axis_data_rst_s;
     for (port = 0; port < NUM_PORTS; port = port+1) begin : gen_ports
 
       rfnoc_siggen_core rfnoc_siggen_core_i (
-        .clk                  (ctrlport_clk_s),
-        .rst                  (ctrlport_rst_s),
+        .clk                  (ce_clk),
+        .rst                  (ce_rst),
         .s_ctrlport_req_wr    (ctrlport_req_wr    [port* 1 +:  1]),
         .s_ctrlport_req_rd    (ctrlport_req_rd    [port* 1 +:  1]),
         .s_ctrlport_req_addr  (ctrlport_req_addr  [port*20 +: 20]),

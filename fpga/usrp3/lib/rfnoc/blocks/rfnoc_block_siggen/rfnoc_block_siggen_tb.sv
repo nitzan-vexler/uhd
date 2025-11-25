@@ -385,7 +385,7 @@ endfunction
   task automatic run_waveform(
     int                 port,
     logic signed [15:0] gain        = 16'h7FFF,  // 0.99997
-    logic         [2:0] mode        = WAVE_CONST,
+    logic         [2:0] mode        = WAVE_SINE, // default = SINE now
     int                 num_packets = 1,
     int                 spp         = SPP,
     logic signed [15:0] const_re    = 16'h7FFF,  // 0.99997
@@ -765,10 +765,8 @@ endtask
     test.end_test();
   endtask : test_waveforms
 
-
-  // Use the constant waveform to test the gain. The gain logic is shared by
-  // all modes, but using "const" waveform makes it easy to control the values
-  // we're testing.
+  // Use the SINE waveform to test the gain.
+  // (Our DUT only implements sine; CONST mode is not used.)
   task automatic test_gain(int port);
     logic signed [15:0] min_val;
     logic signed [15:0] max_val;
@@ -778,26 +776,21 @@ endtask
     max_val = 16'sh7FFF;
     min_val = 16'sh8000;
 
-    // Test max gain with min and max sample values
-    run_waveform(.port(port), .mode(WAVE_CONST), .gain(max_val),
-      .const_re(max_val), .const_im(min_val));
-    // Test min gain with max and min sample values
-    run_waveform(.port(port), .mode(WAVE_CONST), .gain(min_val),
-      .const_re(min_val), .const_im(max_val));
-    // Test zero
-    run_waveform(.port(port), .mode(WAVE_CONST), .gain(0),
-      .const_re(max_val), .const_im(min_val));
-    // Test 0.5 * 0.5 = 0.25 and 0.25 * 0.5 = 0.125
+    // Test max gain with default sine params
+    run_waveform(.port(port), .mode(WAVE_SINE), .gain(max_val));
+    // Test min gain with default sine params
+    run_waveform(.port(port), .mode(WAVE_SINE), .gain(min_val));
+    // Test zero gain
+    run_waveform(.port(port), .mode(WAVE_SINE), .gain(0));
+    // Test mid gain (≈0.5)
     run_waveform(
       .port(port),
-      .mode(WAVE_CONST),
-      .const_re(real_to_fixed(0.5, CONST_FRAC)),
-      .const_im(real_to_fixed(0.25, CONST_FRAC)),
+      .mode(WAVE_SINE),
       .gain(real_to_fixed(0.5, GAIN_FRAC))
-      );
+    );
+
     test.end_test();
   endtask : test_gain
-
 
   // Test the phase setting for the sine waveform
   task automatic test_phase(int port);

@@ -138,29 +138,49 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
 // Free-run if REG_THRESHOLD==0; otherwise use trigger FSM
 // -----------------------------
 
-// Extract signed I/Q from 32-bit input sample (I:[31:16], Q:[15:0])
+
+// Extract I/Q
 wire signed [15:0] in_i = s_tdata[31:16];
 wire signed [15:0] in_q = s_tdata[15:0];
 
-// 16-bit absolute value (two's complement)
-function [15:0] abs16;
-  input signed [15:0] x;
-  begin
-    abs16 = x[15] ? (~x + 16'd1) : x;
-  end
-endfunction
-
-wire [15:0] thr         = reg_threshold[15:0];
+// Threshold
+wire [15:0] thr = reg_threshold[15:0];
 wire        use_trigger = (thr != 16'd0);
-wire        over_thr    = s_tvalid & ((abs16(in_i) >= thr) | (abs16(in_q) >= thr));
-// after 'over_thr' is defined
-reg over_thr_q;
+
+// I^2 and Q^2
+wire [31:0] i_sq = in_i * in_i;
+wire [31:0] q_sq = in_q * in_q;
+wire [32:0] mag_sq = {1'b0,i_sq} + {1'b0,q_sq};
+
+// thr^2 (registered)
+reg [31:0] thr_sq;
 always @(posedge clk) begin
-  if (rst) over_thr_q <= 1'b0;
-  else     over_thr_q <= over_thr;
+  if (rst)
+    thr_sq <= 0;
+  else
+    thr_sq <= thr * thr;
 end
 
-wire trig_pulse = over_thr & ~over_thr_q;  // fire once on rising edge
+// Comparison (registered)
+reg over_thr_d;
+always @(posedge clk) begin
+  if (rst)
+    over_thr_d <= 1'b0;
+  else
+    over_thr_d <= s_tvalid && (mag_sq >= {1'b0,thr_sq});
+end
+
+// Edge detector
+reg over_thr_q;
+always @(posedge clk) begin
+  if (rst)
+    over_thr_q <= 1'b0;
+  else
+    over_thr_q <= over_thr_d;
+end
+
+wire trig_pulse = over_thr_d & ~over_thr_q;
+
 
 // FSM states
 localparam [1:0] ST_IDLE  = 2'd0,
@@ -236,7 +256,6 @@ wire burst_start = use_trigger && (prev_state != ST_BURST) && (state == ST_BURST
 
 
 
-assign m_tlength = { m_tlength_samples, 2'b0 }; // 4 bytes/sample
 
 // If you generate tlast elsewhere, gate it too:
 // assign m_tlast = your_spp_tlast & gated_tvalid;
@@ -323,34 +342,72 @@ mult_rc #(.WIDTH_REAL(16), .WIDTH_CPLX(16), .WIDTH_P(32), .DROP_TOP_P(5), .LATEN
   );
 
 
-  //---------------------------------------------------------------------------
-  // Packet Length Control
-  //---------------------------------------------------------------------------
+//-----------------------------------------------------------------------
+// Packet Length Control + SAFE gating logic
+//-----------------------------------------------------------------------
 
-  wire [REG_SPP_LEN-1:0] m_tlength_samples;
+wire [REG_SPP_LEN-1:0] m_tlength_samples;
+assign m_tlength = {m_tlength_samples, 2'b00};   // 4 bytes per sample
 
-  assign m_tlength = { m_tlength_samples, 2'b0 };   // 4 bytes per sample
+//----------------------------------------------
+// Track packet activity
+//----------------------------------------------
+reg pkt_active;
 
-// Trigger mode only when a threshold is set (free-run otherwise)
+always @(posedge clk) begin
+  if (rst)
+    pkt_active <= 1'b0;
+  else if (m_tvalid && m_tready) begin
+    if (!pkt_active)
+      pkt_active <= 1'b1;
+    if (m_tlast)
+      pkt_active <= 1'b0;
+  end
+end
 
-wire allow_output = reg_enable & (use_trigger ? burst_active : 1'b1);
+//----------------------------------------------
+// Core run-latch (prevents mid-packet abort)
+//----------------------------------------------
+reg core_run;
 
+always @(posedge clk) begin
+  if (rst)
+    core_run <= 1'b0;
+  else if (reg_enable)
+    core_run <= 1'b1;
+  else if (!use_trigger || !burst_active) begin
+    if (!pkt_active)
+      core_run <= 1'b0;
+  end
+end
 
+//----------------------------------------------
+// Final allow_output signal
+//----------------------------------------------
+wire allow_output = core_run & (use_trigger ? burst_active : 1'b1);
 
+//----------------------------------------------
+// Packetizer
+//----------------------------------------------
 axis_packetize #(
-  .DATA_W (32), .SIZE_W (REG_SPP_LEN), .FLUSH(1)
+  .DATA_W (32),
+  .SIZE_W (REG_SPP_LEN),
+  .FLUSH  (1)
 ) axis_packetize_i (
   .clk      (clk),
   .rst      (rst),
-  .gate     (~allow_output),           // <-- only gate here
+  .gate     (~allow_output),  // SAFE gating
   .size     (reg_spp),
-  .i_tdata  (axis_round_tdata),        // <-- do NOT AND with allow_output
-  .i_tvalid (axis_round_tvalid),       // <-- leave this untouched
+
+  .i_tdata  (axis_round_tdata),
+  .i_tvalid (axis_round_tvalid),
   .i_tready (axis_round_tready),
+
   .o_tdata  (m_tdata),
   .o_tlast  (m_tlast),
   .o_tvalid (m_tvalid),
   .o_tready (m_tready),
+
   .o_tuser  (m_tlength_samples)
 );
 
