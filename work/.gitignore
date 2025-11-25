@@ -1,0 +1,18 @@
+# Ignore build outputs
+build/
+
+# Ignore compiled binaries
+*.o
+*.so
+*.a
+*.exe
+*.out
+
+# Ignore CMake cache
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Ignore logs
+*.log
