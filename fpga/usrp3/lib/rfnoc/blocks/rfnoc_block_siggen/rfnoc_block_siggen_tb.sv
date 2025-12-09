@@ -228,6 +228,67 @@ function automatic item_t pack_iq(
   return v;
 endfunction
 
+//---------------------------------------------------------------------------
+  // Pipeline latency measurement helper
+  //---------------------------------------------------------------------------
+task automatic measure_pipeline_latency(
+    int port_in  = 0,
+    int port_out = 0
+);
+    item_t tx[$];
+    item_t items[$];
+    int cycles;
+    localparam int WARMUP = 8; // match your core warm-up
+
+    test.start_test("Measure pipeline latency", 2ms);
+
+    // Configure block
+    write_reg(port_out, REG_ENABLE,     1);
+    write_reg(port_out, REG_SPP,        64);
+    write_reg(port_out, REG_GAIN,       16'h7FFF);
+    write_reg(port_out, REG_PHASE_INC,  16'd64);
+    write_reg(port_out, REG_CARTESIAN,  {16'sh7FFF,16'sh0000});
+    write_reg(port_out, REG_THRESHOLD,  16'd2000);
+    write_reg(port_out, REG_PULSEWIDTH, 1);       // single-sample "burst"
+    write_reg(port_out, REG_DELAY,      0);       // no extra delay
+
+    // Build payload: many below-threshold, 1 above-threshold, then more below
+    tx.delete();
+    for (int i = 0; i < 16; i++) tx.push_back(pack_iq(16'sd200, 16'sd0)); // below thr
+    tx.push_back(pack_iq(16'sd4000, 16'sd0));                             // trigger
+    for (int i = 0; i < 16; i++) tx.push_back(pack_iq(16'sd200, 16'sd0)); // below thr
+    blk_ctrl.send_items(port_in, tx);
+
+    // Wait for output
+    cycles = 0;
+    forever begin
+        #(CE_CLK_PER);
+        cycles = cycles + 1;
+
+        if (blk_ctrl.num_received(port_out) > 0) begin
+            blk_ctrl.recv_items(port_out, items);
+            $display("Pipeline latency observed: %0d CE_CLK cycles", cycles);
+            `ASSERT_ERROR(items.size() > 0, "Empty packet received");
+            break;
+        end
+
+        if (cycles > 10000) begin
+            $display("Timeout: No output observed within 10000 cycles");
+            break;
+        end
+    end
+
+    // Clean up
+    write_reg(port_out, REG_ENABLE, 0);
+    flush_output(port_out);
+
+    test.end_test();
+endtask
+
+
+
+
+
 
   // Convert real to signed 16-bit fixed point with "frac" fractional bits
   function automatic logic [15:0] real_to_fixed(real value, int frac = 15);
@@ -875,6 +936,9 @@ endtask
     // NEW input-trigger tests
     test_no_trigger_no_output(0, 0);
     test_trigger_delay_burst_len(0, 0);
+    // Measure the pipeline latency for port 0
+    measure_pipeline_latency(0);
+
 
     //--------------------------------
     // Finish Up

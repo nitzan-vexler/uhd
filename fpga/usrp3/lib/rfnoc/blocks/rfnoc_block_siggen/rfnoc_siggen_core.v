@@ -12,7 +12,10 @@
 //
 
 
-module rfnoc_siggen_core (
+module rfnoc_siggen_core #(
+  parameter integer PIPE_LATENCY = 16 // Measured pipeline latency in CE_CLK cycles
+)(
+
   input wire clk,
   input wire rst,
 
@@ -196,56 +199,92 @@ reg [REG_PULSEWIDTH_LEN-1:0] pw_ctr;
 // FSM-controlled burst flag
 reg fsm_burst_active;
 
-wire burst_active = use_trigger ? fsm_burst_active : 1'b1;
 
+
+
+reg [6:0] tail_ctr;
+reg tail_active;
+wire burst_active = use_trigger ? (fsm_burst_active || tail_active) : 1'b1;
 // IMPORTANT: Count pulsewidth only for *visible* samples
 wire sample_fire = m_tvalid & m_tready;
 
-// FSM (armed only when use_trigger==1)
+
+// Updated FSM
 always @(posedge clk) begin
   if (rst) begin
     state            <= ST_IDLE;
     delay_ctr        <= {REG_DELAY_LEN{1'b0}};
     pw_ctr           <= {REG_PULSEWIDTH_LEN{1'b0}};
     fsm_burst_active <= 1'b0;
+    tail_active      <= 1'b0;
+    tail_ctr         <= 0;
   end else if (use_trigger) begin
     case (state)
+
       ST_IDLE: begin
         fsm_burst_active <= 1'b0;
+        tail_active      <= 1'b0;
         if (trig_pulse) begin
           delay_ctr <= reg_delay;
           pw_ctr    <= reg_pulsewidth;
-          state     <= (reg_delay == {REG_DELAY_LEN{1'b0}}) ? ST_BURST : ST_DELAY;
+          state     <= (reg_delay == 0) ? ST_BURST : ST_DELAY;
         end
       end
+
       ST_DELAY: begin
-        if (delay_ctr != {REG_DELAY_LEN{1'b0}})
-          delay_ctr <= delay_ctr - {{(REG_DELAY_LEN-1){1'b0}},1'b1};
+        if (delay_ctr != 0)
+          delay_ctr <= delay_ctr - 1;
         else
           state <= ST_BURST;
       end
+
       ST_BURST: begin
+        // Burst is logically active
         fsm_burst_active <= 1'b1;
-        if (sample_fire) begin
-          if (pw_ctr != {REG_PULSEWIDTH_LEN{1'b0}})
-            pw_ctr <= pw_ctr - {{(REG_PULSEWIDTH_LEN-1){1'b0}},1'b1};
+
+        // 1) Handle pulsewidth counting based on actual visible samples
+        if (sample_fire && (pw_ctr != 0)) begin
+          pw_ctr <= pw_ctr - 1;
+        end
+
+        // 2) When pw_ctr reaches zero and we've seen at least one sample,
+        //    start the tail flush exactly once.
+        if (sample_fire && (pw_ctr == 0) && !tail_active) begin
+          tail_active <= 1'b1;
+          tail_ctr    <= PIPE_LATENCY[6:0];
+        end
+
+        // 3) Tail drain runs in *clock cycles*, independent of backpressure.
+        if (tail_active) begin
+          if (tail_ctr != 0)
+            tail_ctr <= tail_ctr - 1;
           else begin
+            // Done flushing pipeline
             fsm_burst_active <= 1'b0;
+            tail_active      <= 1'b0;
             state            <= ST_IDLE;
           end
         end
       end
+
+
       default: begin
         state            <= ST_IDLE;
         fsm_burst_active <= 1'b0;
+        tail_active      <= 1'b0;
       end
+
     endcase
   end else begin
-    // Free-run mode (no trigger)
+    // Free-run mode
     state            <= ST_IDLE;
     fsm_burst_active <= 1'b0;
+    tail_active      <= 1'b0;
   end
 end
+
+
+
 // Track previous state to detect entering ST_BURST
 reg [1:0] prev_state;
 always @(posedge clk) begin
@@ -304,6 +343,7 @@ wire burst_start = use_trigger && (prev_state != ST_BURST) && (state == ST_BURST
   //---------------------------------------------------------------------------
   // Gain
   //---------------------------------------------------------------------------
+  
 wire [63:0] axis_gain_tdata;
 wire        axis_gain_tvalid, axis_gain_tready;
 
@@ -322,6 +362,13 @@ mult_rc #(.WIDTH_REAL(16), .WIDTH_CPLX(16), .WIDTH_P(32), .DROP_TOP_P(5), .LATEN
   .cplx_tlast(1'b0), .cplx_tvalid(axis_src_tvalid), .cplx_tready(axis_src_tready),
   .p_tdata(axis_gain_tdata), .p_tlast(), .p_tvalid(axis_gain_tvalid), .p_tready(axis_gain_tready)
 );
+
+//---------------------------------------------------------------------------
+ // Round + Clip (you need these wires here!)
+//---------------------------------------------------------------------------
+wire [31:0] axis_round_tdata;
+wire        axis_round_tvalid;
+wire        axis_round_tready;
 
 
   axi_round_and_clip_complex #(
