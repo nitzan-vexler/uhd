@@ -153,3 +153,6 @@ localparam        REG_DELAY_LEN      = 32;
 // rfnoc_siggen_regs.vh (or wherever you define regs)
 localparam REG_WARMUP   = 'h28;
 localparam REG_WARMUP_LEN      = 8;       // up to 255 samples is plenty
+// 0x2C: delay before *second* pulse (in ce_clk cycles)
+localparam [19:0] REG_DELAY_2 = 20'h0002C;
+localparam        REG_DELAY_2_LEN = 32;

@@ -62,7 +62,10 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
   reg [REG_THRESHOLD_LEN-1:0]  reg_threshold  = 0;
   reg [REG_PULSEWIDTH_LEN-1:0] reg_pulsewidth = 16'd32;
   reg [REG_DELAY_LEN-1:0]      reg_delay      = 32'd0;
+  reg [REG_DELAY_LEN-1:0]     reg_delay_2 = 32'd10000;  // example default
   reg [REG_WARMUP_LEN-1:0]    reg_warmup;
+
+
 
   reg reg_phase_inc_stb;
   reg reg_cartesian_stb;
@@ -84,6 +87,8 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
       reg_phase_inc_stb    <= 1'b0;
       reg_cartesian_stb    <= 1'b0;
       reg_warmup <= {REG_WARMUP_LEN{1'b0}};   // default 0 (no warm-up)
+
+
     end else begin
 
       // Default assignments
@@ -105,6 +110,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_PULSEWIDTH : reg_pulsewidth <= s_ctrlport_req_data[REG_PULSEWIDTH_LEN-1:0];
           REG_DELAY      : reg_delay      <= s_ctrlport_req_data[REG_DELAY_LEN-1:0];
           REG_WARMUP     : reg_warmup     <= s_ctrlport_req_data[REG_WARMUP_LEN-1:0];
+          REG_DELAY_2    : reg_delay_2 <= s_ctrlport_req_data;
           REG_PHASE_INC : begin
             reg_phase_inc     <= s_ctrlport_req_data[REG_PHASE_INC_LEN-1:0];
             reg_phase_inc_stb <= 1'b1;
@@ -131,6 +137,8 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_PULSEWIDTH : s_ctrlport_resp_data[REG_PULSEWIDTH_LEN-1:0] <= reg_pulsewidth;
           REG_DELAY      : s_ctrlport_resp_data[REG_DELAY_LEN-1:0]      <= reg_delay;
           REG_WARMUP      : s_ctrlport_resp_data[REG_WARMUP_LEN-1:0]      <= reg_warmup;
+          REG_DELAY_2    : s_ctrlport_resp_data[REG_DELAY_LEN-1:0] <= reg_delay_2;
+
         endcase
       end
     end
@@ -185,6 +193,7 @@ end
 wire trig_pulse = over_thr_d & ~over_thr_q;
 
 
+
 // FSM states
 localparam [1:0] ST_IDLE  = 2'd0,
                  ST_DELAY = 2'd1,
@@ -195,6 +204,8 @@ reg [1:0] state;
 // Counters (match your register widths)
 reg [REG_DELAY_LEN-1:0]      delay_ctr;
 reg [REG_PULSEWIDTH_LEN-1:0] pw_ctr;
+reg [1:0] burst_count;
+reg [REG_DELAY_LEN-1:0] saved_delay_2;
 
 // FSM-controlled burst flag
 reg fsm_burst_active;
@@ -218,6 +229,8 @@ always @(posedge clk) begin
     fsm_burst_active <= 1'b0;
     tail_active      <= 1'b0;
     tail_ctr         <= 0;
+    burst_count     <= 0;
+    saved_delay_2   <= 0;
   end else if (use_trigger) begin
     case (state)
 
@@ -225,10 +238,13 @@ always @(posedge clk) begin
         fsm_burst_active <= 1'b0;
         tail_active      <= 1'b0;
         if (trig_pulse) begin
-          delay_ctr <= reg_delay;
-          pw_ctr    <= reg_pulsewidth;
-          state     <= (reg_delay == 0) ? ST_BURST : ST_DELAY;
+          delay_ctr   <= reg_delay;
+          pw_ctr      <= reg_pulsewidth;
+          burst_count <= 2;  // emit 2 pulses
+          saved_delay_2 <= reg_delay_2;
+          state       <= (reg_delay == 0) ? ST_BURST : ST_DELAY;
         end
+
       end
 
       ST_DELAY: begin
@@ -238,34 +254,41 @@ always @(posedge clk) begin
           state <= ST_BURST;
       end
 
-      ST_BURST: begin
-        // Burst is logically active
-        fsm_burst_active <= 1'b1;
-
-        // 1) Handle pulsewidth counting based on actual visible samples
-        if (sample_fire && (pw_ctr != 0)) begin
-          pw_ctr <= pw_ctr - 1;
-        end
-
-        // 2) When pw_ctr reaches zero and we've seen at least one sample,
-        //    start the tail flush exactly once.
-        if (sample_fire && (pw_ctr == 0) && !tail_active) begin
-          tail_active <= 1'b1;
-          tail_ctr    <= PIPE_LATENCY[6:0];
-        end
-
-        // 3) Tail drain runs in *clock cycles*, independent of backpressure.
-        if (tail_active) begin
-          if (tail_ctr != 0)
-            tail_ctr <= tail_ctr - 1;
-          else begin
-            // Done flushing pipeline
-            fsm_burst_active <= 1'b0;
-            tail_active      <= 1'b0;
-            state            <= ST_IDLE;
+        ST_BURST: begin
+      // Burst is logically active
+      fsm_burst_active <= 1'b1;
+    
+      // Count pulsewidth only when outputting a sample
+      if (sample_fire && (pw_ctr != 0)) begin
+        pw_ctr <= pw_ctr - 1;
+      end
+    
+      // Tail flush: after pulse ends and we saw at least one sample
+      if (sample_fire && (pw_ctr == 0) && !tail_active) begin
+        tail_active <= 1'b1;
+        tail_ctr    <= PIPE_LATENCY[6:0];
+      end
+    
+      // Wait PIPE_LAT cycles to flush pipeline, then handle second pulse
+      if (tail_active) begin
+        if (tail_ctr != 0) begin
+          tail_ctr <= tail_ctr - 1;
+        end else begin
+          fsm_burst_active <= 1'b0;
+          tail_active      <= 1'b0;
+    
+          if (burst_count > 1) begin
+            burst_count <= burst_count - 1;
+            delay_ctr   <= saved_delay_2;
+            pw_ctr      <= reg_pulsewidth;
+            state       <= (saved_delay_2 == 0) ? ST_BURST : ST_DELAY;
+          end else begin
+            state <= ST_IDLE;
           end
         end
       end
+    end
+    
 
 
       default: begin
