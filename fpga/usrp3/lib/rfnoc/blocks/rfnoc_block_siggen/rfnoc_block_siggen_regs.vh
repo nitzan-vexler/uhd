@@ -12,7 +12,7 @@
 // Address space size, per signal generator core. That is, each signal
 // generator core's address space is separated in the CtrlPort address space
 // by 2^SIGGEN_ADDR_W bytes.
-localparam SIGGEN_ADDR_W = 5;
+localparam SIGGEN_ADDR_W = 6;
 
 
 
@@ -25,7 +25,7 @@ localparam SIGGEN_ADDR_W = 5;
 // [31:1] Reserved
 // [0]    Enable bit
 //
-localparam REG_ENABLE = 'h00;
+localparam [19:0] REG_ENABLE     = 20'h00000;
 //
 localparam REG_ENABLE_LEN = 1;
 
@@ -35,7 +35,7 @@ localparam REG_ENABLE_LEN = 1;
 // The number of samples per packet to output for the selected waveform. This
 // is read at the start of each new packet.
 //
-localparam REG_SPP = 'h04;
+localparam [19:0] REG_SPP        = 20'h00004;
 //
 localparam REG_SPP_LEN = 14;
 
@@ -48,7 +48,7 @@ localparam REG_SPP_LEN = 14;
 //   1 : (WAVE_SINE)  Sine wave
 //   2 : (WAVE_NOISE) Noise / random data
 //
-localparam REG_WAVEFORM = 'h08;
+localparam [19:0] REG_WAVEFORM = 20'h00008;
 //
 localparam REG_WAVEFORM_LEN = 2;
 //
@@ -64,7 +64,7 @@ localparam WAVE_NOISE = 2'h2;
 // parts of each output sample. This gain is applied to all waveform output
 // types.
 //
-localparam REG_GAIN = 'h0C;
+localparam [19:0] REG_GAIN       = 20'h0000C;
 //
 localparam REG_GAIN_LEN = 16;
 
@@ -78,7 +78,7 @@ localparam REG_GAIN_LEN = 16;
 // [31:16] X/I/Real component
 // [15: 0] Y/Q/Imaginary component
 
-localparam REG_CONSTANT = 'h10;
+localparam [19:0] REG_CONSTANT   = 20'h00010;
 //
 localparam REG_CONSTANT_LEN = 32;
 
@@ -99,7 +99,7 @@ localparam REG_CONSTANT_LEN = 32;
 // [15: 0] : Signed fixed-point phase value with 3 integer bits and 13
 //           fractional bits.
 //
-localparam REG_PHASE_INC = 'h14;
+localparam [19:0] REG_PHASE_INC  = 20'h00014;
 //
 localparam REG_PHASE_INC_LEN = 16;
 
@@ -130,6 +130,32 @@ localparam REG_PHASE_INC_LEN = 16;
 // [31:16] : X/I/Real component
 // [15: 0] : Y/Q/Imaginary component
 //
-localparam REG_CARTESIAN = 'h18;
+localparam [19:0] REG_CARTESIAN  = 20'h00018;
 //
 localparam REG_CARTESIAN_LEN = 32;
+
+
+// New mode (optional)
+localparam [2:0] WAVE_SINE_TRIG      = 3'd4;
+
+// 0x1C: threshold for trigger
+localparam [19:0] REG_THRESHOLD  = 20'h0001C;
+localparam        REG_THRESHOLD_LEN  = 16;
+
+// 0x20: pulse width (samples in the burst)
+localparam [19:0] REG_PULSEWIDTH = 20'h00020;
+localparam        REG_PULSEWIDTH_LEN = 16;
+
+// 0x24: delay before transmitting the burst (in ce_clk cycles)
+localparam [19:0] REG_DELAY      = 20'h00024;  // <-- yes, 0x24 is correct
+localparam        REG_DELAY_LEN      = 32;
+
+// rfnoc_siggen_regs.vh (or wherever you define regs)
+localparam REG_WARMUP   = 'h28;
+localparam REG_WARMUP_LEN      = 8;       // up to 255 samples is plenty
+// 0x2C: delay before *second* pulse (in ce_clk cycles)
+localparam [19:0] REG_DELAY_2 = 20'h0002C;
+localparam        REG_DELAY_2_LEN = 32;
+
+localparam REG_PULSE2_GAIN       = 20'h34;
+localparam REG_PULSE2_GAIN_LEN   = 16;

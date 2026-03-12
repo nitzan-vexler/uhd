@@ -19,15 +19,21 @@
 using namespace uhd::rfnoc;
 
 
-// Register offsets
-const uint32_t siggen_block_control::REG_BLOCK_SIZE       = 1 << 5;
-const uint32_t siggen_block_control::REG_ENABLE_OFFSET    = 0x00;
-const uint32_t siggen_block_control::REG_SPP_OFFSET       = 0x04;
-const uint32_t siggen_block_control::REG_WAVEFORM_OFFSET  = 0x08;
-const uint32_t siggen_block_control::REG_GAIN_OFFSET      = 0x0C;
-const uint32_t siggen_block_control::REG_CONSTANT_OFFSET  = 0x10;
-const uint32_t siggen_block_control::REG_PHASE_INC_OFFSET = 0x14;
-const uint32_t siggen_block_control::REG_CARTESIAN_OFFSET = 0x18;
+const uint32_t siggen_block_control::REG_BLOCK_SIZE         = 1 << 6;
+const uint32_t siggen_block_control::REG_ENABLE_OFFSET      = 0x00;
+const uint32_t siggen_block_control::REG_SPP_OFFSET         = 0x04;
+const uint32_t siggen_block_control::REG_WAVEFORM_OFFSET    = 0x08;
+const uint32_t siggen_block_control::REG_GAIN_OFFSET        = 0x0C;
+const uint32_t siggen_block_control::REG_CONSTANT_OFFSET    = 0x10;
+const uint32_t siggen_block_control::REG_PHASE_INC_OFFSET   = 0x14;
+const uint32_t siggen_block_control::REG_CARTESIAN_OFFSET   = 0x18;
+const uint32_t siggen_block_control::REG_THRESHOLD_OFFSET   = 0x1C;
+const uint32_t siggen_block_control::REG_PULSEWIDTH_OFFSET  = 0x20;
+const uint32_t siggen_block_control::REG_DELAY_OFFSET       = 0x24;
+const uint32_t siggen_block_control::REG_WARMUP_OFFSET      = 0x28;
+const uint32_t siggen_block_control::REG_DELAY_2_OFFSET     = 0x2C;
+const uint32_t siggen_block_control::REG_PULSE2_GAIN_OFFSET = 0x34;
+
 
 // User property names
 const char* const PROP_KEY_ENABLE         = "enable";
@@ -36,6 +42,12 @@ const char* const PROP_KEY_AMPLITUDE      = "amplitude";
 const char* const PROP_KEY_CONSTANT_I     = "constant_i";
 const char* const PROP_KEY_CONSTANT_Q     = "constant_q";
 const char* const PROP_KEY_SINE_PHASE_INC = "sine_phase_increment";
+const char* const PROP_KEY_THRESHOLD      = "threshold";
+const char* const PROP_KEY_PULSEWIDTH     = "pulsewidth";
+const char* const PROP_KEY_DELAY          = "delay";
+const char* const PROP_KEY_WARMUP         = "warmup";
+const char* const PROP_KEY_DELAY_2        = "delay_2";
+const char* const PROP_KEY_PULSE2_GAIN    = "pulse2_gain";
 
 namespace {
 template <class T>
@@ -117,6 +129,74 @@ public:
     {
         return _prop_spp.at(port).get();
     }
+    
+    
+    
+        void set_threshold(const double threshold, const size_t port) override
+    {
+        set_property<double>(PROP_KEY_THRESHOLD, threshold, port);
+    }
+
+    double get_threshold(const size_t port) const override
+    {
+        return _prop_threshold.at(port).get();
+    }
+    
+    
+    
+  void set_delay(const size_t delay, const size_t port) override
+{
+    set_property<int>(PROP_KEY_DELAY, int(delay), port);
+}
+
+size_t get_delay(const size_t port) const override
+{
+    return size_t(_prop_delay.at(port).get());
+}
+
+void set_pulsewidth(const size_t pulsewidth, const size_t port) override
+{
+    set_property<int>(PROP_KEY_PULSEWIDTH, int(pulsewidth), port);
+}
+
+size_t get_pulsewidth(const size_t port) const override
+{
+    return size_t(_prop_pulsewidth.at(port).get());
+}
+    
+    
+	void set_warmup(const size_t warmup, const size_t port) override
+	{
+	    set_property<int>(PROP_KEY_WARMUP, int(warmup), port);
+	}
+
+	size_t get_warmup(const size_t port) const override
+	{
+	    return size_t(_prop_warmup.at(port).get());
+	}
+
+	void set_delay_2(const size_t delay_2, const size_t port) override
+	{
+	    set_property<int>(PROP_KEY_DELAY_2, int(delay_2), port);
+	}
+
+	size_t get_delay_2(const size_t port) const override
+	{
+	    return size_t(_prop_delay_2.at(port).get());
+	}
+
+	void set_pulse2_gain(const double gain, const size_t port) override
+	{
+	    set_property<double>(PROP_KEY_PULSE2_GAIN, gain, port);
+	}
+
+	double get_pulse2_gain(const size_t port) const override
+	{
+	    return _prop_pulse2_gain.at(port).get();
+	}
+	    
+
+
 
     /**************************************************************************
      * Initialization
@@ -133,6 +213,13 @@ private:
         _prop_phase_inc.reserve(num_outputs);
         _prop_spp.reserve(num_outputs);
         _prop_type_out.reserve(num_outputs);
+_prop_threshold.reserve(num_outputs);
+_prop_pulsewidth.reserve(num_outputs);
+_prop_delay.reserve(num_outputs);
+_prop_warmup.reserve(num_outputs);
+_prop_delay_2.reserve(num_outputs);
+_prop_pulse2_gain.reserve(num_outputs);
+
 
         for (size_t port = 0; port < num_outputs; port++) {
             // register edge properties
@@ -154,6 +241,7 @@ private:
                 PROP_KEY_CONSTANT_Q, 1.0, {res_source_info::USER, port}});
             _prop_phase_inc.emplace_back(property_t<double>{
                 PROP_KEY_SINE_PHASE_INC, 1.0, {res_source_info::USER, port}});
+
             const int default_spp =
                 static_cast<int>(
                     get_max_payload_size({res_source_info::OUTPUT_EDGE, port}))
@@ -198,6 +286,59 @@ private:
                     "Setting samples per packet to " << spp << " on port " << port);
                 _siggen_reg_iface.poke32(REG_SPP_OFFSET, spp, port);
             });
+            
+						_prop_threshold.emplace_back(property_t<double>{
+				PROP_KEY_THRESHOLD, 0.0, {res_source_info::USER, port}});
+			register_property(&_prop_threshold.back(), [this, port]() {
+				// raw SC16 magnitude 0..32767
+				const double v = _prop_threshold.at(port).get();
+				const uint16_t thr = clamp<uint16_t>(v);
+				_siggen_reg_iface.poke32(REG_THRESHOLD_OFFSET, uint32_t(thr), port);
+			});
+
+			_prop_pulsewidth.emplace_back(property_t<int>{
+    PROP_KEY_PULSEWIDTH, 32, {res_source_info::USER, port}});
+register_property(&_prop_pulsewidth.back(), [this, port]() {
+    const int v = _prop_pulsewidth.at(port).get();
+    const uint16_t pw = (v < 0) ? 0 : uint16_t(v);
+    _siggen_reg_iface.poke32(REG_PULSEWIDTH_OFFSET, uint32_t(pw), port);
+});
+
+_prop_delay.emplace_back(property_t<int>{
+    PROP_KEY_DELAY, 0, {res_source_info::USER, port}});
+register_property(&_prop_delay.back(), [this, port]() {
+    const int v = _prop_delay.at(port).get();
+    const uint32_t dly = (v < 0) ? 0u : uint32_t(v);
+    _siggen_reg_iface.poke32(REG_DELAY_OFFSET, dly, port);
+});
+
+			_prop_delay_2.emplace_back(property_t<int>{
+    PROP_KEY_DELAY_2, 0, {res_source_info::USER, port}});
+register_property(&_prop_delay_2.back(), [this, port]() {
+    const int v = _prop_delay_2.at(port).get();
+    const uint32_t dly2 = (v < 0) ? 0u : uint32_t(v);
+    _siggen_reg_iface.poke32(REG_DELAY_2_OFFSET, dly2, port);
+});
+
+_prop_pulse2_gain.emplace_back(property_t<double>{
+    PROP_KEY_PULSE2_GAIN, 1.0, {res_source_info::USER, port}});
+register_property(&_prop_pulse2_gain.back(), [this, port]() {
+    const double v = _prop_pulse2_gain.at(port).get();
+    if (v < 0.0 || v > 1.0) {
+        throw uhd::value_error("Pulse2 gain value must be in [0.0, 1.0]");
+    }
+    const int16_t gain_fp = clamp<int16_t>(v * 32768.0);
+    _siggen_reg_iface.poke32(REG_PULSE2_GAIN_OFFSET, uint32_t(gain_fp), port);
+});
+
+            
+_prop_warmup.emplace_back(property_t<int>{
+    PROP_KEY_WARMUP, 0, {res_source_info::USER, port}});
+register_property(&_prop_warmup.back(), [this, port]() {
+    const int v = _prop_warmup.at(port).get();
+    const uint8_t warmup = (v < 0) ? 0u : uint8_t(v > 255 ? 255 : v);
+    _siggen_reg_iface.poke32(REG_WARMUP_OFFSET, uint32_t(warmup), port);
+});
 
             add_property_resolver({&_prop_waveform.back(), &_prop_amplitude.back()},
                 {&_prop_amplitude.back()},
@@ -324,14 +465,22 @@ private:
     /**************************************************************************
      * Attributes
      *************************************************************************/
-    std::vector<property_t<bool>> _prop_enable;
-    std::vector<property_t<int>> _prop_waveform;
-    std::vector<property_t<double>> _prop_amplitude;
-    std::vector<property_t<double>> _prop_constant_i;
-    std::vector<property_t<double>> _prop_constant_q;
-    std::vector<property_t<double>> _prop_phase_inc;
-    std::vector<property_t<int>> _prop_spp;
-    std::vector<property_t<std::string>> _prop_type_out;
+std::vector<property_t<bool>> _prop_enable;
+std::vector<property_t<int>> _prop_waveform;
+std::vector<property_t<double>> _prop_amplitude;
+std::vector<property_t<double>> _prop_constant_i;
+std::vector<property_t<double>> _prop_constant_q;
+std::vector<property_t<double>> _prop_phase_inc;
+std::vector<property_t<int>> _prop_spp;
+std::vector<property_t<std::string>> _prop_type_out;
+
+std::vector<property_t<double>> _prop_threshold;
+std::vector<property_t<int>> _prop_pulsewidth;
+std::vector<property_t<int>> _prop_delay;
+std::vector<property_t<int>> _prop_warmup;
+std::vector<property_t<int>> _prop_delay_2;
+std::vector<property_t<double>> _prop_pulse2_gain;
+
 
     /**************************************************************************
      * Register interface

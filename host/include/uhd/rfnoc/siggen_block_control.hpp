@@ -38,6 +38,14 @@ public:
     static const uint32_t REG_CONSTANT_OFFSET;
     static const uint32_t REG_PHASE_INC_OFFSET;
     static const uint32_t REG_CARTESIAN_OFFSET;
+    static const uint32_t REG_THRESHOLD_OFFSET;
+    static const uint32_t REG_PULSEWIDTH_OFFSET;
+    static const uint32_t REG_DELAY_OFFSET;
+    static const uint32_t REG_WARMUP_OFFSET;
+    static const uint32_t REG_DELAY_2_OFFSET;
+    static const uint32_t REG_PULSE2_GAIN_OFFSET;
+
+
 
     /*! Set the function generator stream enable flag
      *
@@ -188,7 +196,33 @@ public:
      * \param frequency The desired frequency of the sinusoid
      * \param sample_rate The assumed sample rate
      * \param port The port on the block whose phase increment to set
+     
      */
+     
+     // NEW: Trigger threshold (raw SC16 magnitude, 0..32767)
+virtual void   set_threshold(const double threshold, const size_t port) = 0;
+virtual double get_threshold(const size_t port) const = 0;
+
+virtual void set_pulsewidth(const size_t pulsewidth, const size_t port) = 0;
+virtual size_t get_pulsewidth(const size_t port) const = 0;
+
+virtual void set_delay(const size_t delay, const size_t port) = 0;
+virtual size_t get_delay(const size_t port) const = 0;
+
+  // Warmup in ce_clk cycles
+    virtual void set_warmup(const size_t warmup, const size_t port) = 0;
+    virtual size_t get_warmup(const size_t port) const = 0;
+
+    // Delay before second pulse in ce_clk cycles
+    virtual void set_delay_2(const size_t delay_2, const size_t port) = 0;
+    virtual size_t get_delay_2(const size_t port) const = 0;
+
+    // Pulse-2 gain scale in normalized range [0.0, 1.0]
+    virtual void set_pulse2_gain(const double gain, const size_t port) = 0;
+    virtual double get_pulse2_gain(const size_t port) const = 0;
+
+
+
     inline void set_sine_frequency(
         const double frequency, const double sample_rate, const size_t port)
     {
