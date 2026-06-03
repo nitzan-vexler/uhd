@@ -63,6 +63,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
   reg [REG_PULSEWIDTH_LEN-1:0] reg_pulsewidth = 16'd32;
   reg [REG_DELAY_LEN-1:0]      reg_delay      = 32'd0;
   reg [REG_WARMUP_LEN-1:0]    reg_warmup;
+  reg [31:0] dbg_avg_power;
 
   reg reg_phase_inc_stb;
   reg reg_cartesian_stb;
@@ -131,6 +132,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_PULSEWIDTH : s_ctrlport_resp_data[REG_PULSEWIDTH_LEN-1:0] <= reg_pulsewidth;
           REG_DELAY      : s_ctrlport_resp_data[REG_DELAY_LEN-1:0]      <= reg_delay;
           REG_WARMUP      : s_ctrlport_resp_data[REG_WARMUP_LEN-1:0]      <= reg_warmup;
+          REG_DBG_AVG_POWER : s_ctrlport_resp_data <= {16'd0, tx_amp_from_power};
         endcase
       end
     end
@@ -185,10 +187,10 @@ end
 wire trig_pulse = over_thr_d & ~over_thr_q;
 
 
-// FSM states
 localparam [1:0] ST_IDLE  = 2'd0,
-                 ST_DELAY = 2'd1,
-                 ST_BURST = 2'd2;
+                 ST_PEAK  = 2'd1,
+                 ST_DELAY = 2'd2,
+                 ST_BURST = 2'd3;
 
 reg [1:0] state;
 
@@ -199,7 +201,11 @@ reg [REG_PULSEWIDTH_LEN-1:0] pw_ctr;
 // FSM-controlled burst flag
 reg fsm_burst_active;
 
+localparam PEAK_SEARCH_SAMPLES = 128;
+reg [7:0] peak_cnt;
+reg        peak_search_active;
 
+reg [31:0] trigger_sample;
 
 
 reg [6:0] tail_ctr;
@@ -208,8 +214,47 @@ wire burst_active = use_trigger ? (fsm_burst_active || tail_active) : 1'b1;
 // IMPORTANT: Count pulsewidth only for *visible* samples
 wire sample_fire = m_tvalid & m_tready;
 
+// synthesis translate_off
+always @(posedge clk) begin
+  if (!rst) begin
+    if (trig_pulse)
+      $display("%0t SIGGEN trig_pulse s_tdata=0x%08x mag_sq=%0d thr_sq=%0d",
+        $time, s_tdata, mag_sq, thr_sq);
 
-// Updated FSM
+    if (burst_start)
+      $display("%0t SIGGEN burst_start trigger_sample=0x%08x",
+        $time, trigger_sample);
+
+    if (m_tvalid && m_tready)
+      $display("%0t SIGGEN OUT m_tdata=0x%08x m_tlast=%0d",
+        $time, m_tdata, m_tlast);
+  end
+end
+// synthesis translate_on
+
+function [15:0] isqrt_sat16;
+  input [39:0] x;
+  integer i;
+  reg [31:0] test;
+  begin
+    isqrt_sat16 = 16'd0;
+
+    for (i = 15; i >= 0; i = i - 1) begin
+      test = ({16'd0, isqrt_sat16} | (32'd1 << i));
+      if ((test * test) <= x)
+        isqrt_sat16[i] = 1'b1;
+    end
+  end
+endfunction
+    
+reg [47:0] power_accum;
+
+wire [47:0] power_accum_next = power_accum + {15'd0, mag_sq};
+wire [39:0] avg_power_128 = power_accum_next[47:7]; // divide by 128
+
+wire [15:0] tx_amp_from_power = isqrt_sat16(avg_power_128);
+
+    
 always @(posedge clk) begin
   if (rst) begin
     state            <= ST_IDLE;
@@ -218,18 +263,46 @@ always @(posedge clk) begin
     fsm_burst_active <= 1'b0;
     tail_active      <= 1'b0;
     tail_ctr         <= 0;
+
+    peak_cnt           <= 8'd0;
+    peak_search_active <= 1'b0;
+    trigger_sample     <= 32'd0;
+    power_accum <= 48'd0;
+    dbg_avg_power      <= 32'd0;   // MOVE HERE
+
+
   end else if (use_trigger) begin
     case (state)
 
       ST_IDLE: begin
         fsm_burst_active <= 1'b0;
         tail_active      <= 1'b0;
+        peak_search_active <= 1'b0;
+
         if (trig_pulse) begin
-          delay_ctr <= reg_delay;
-          pw_ctr    <= reg_pulsewidth;
-          state     <= (reg_delay == 0) ? ST_BURST : ST_DELAY;
+          peak_search_active <= 1'b1;
+          peak_cnt           <= PEAK_SEARCH_SAMPLES - 1;
+          power_accum <= {15'd0, mag_sq};
+          state              <= ST_PEAK;
         end
       end
+
+ST_PEAK: begin
+  if (s_tvalid) begin
+power_accum <= power_accum_next;
+    if (peak_cnt != 0) begin
+      peak_cnt <= peak_cnt - 1;
+    end else begin
+      peak_search_active <= 1'b0;
+dbg_avg_power <= avg_power_128[31:0];
+trigger_sample <= {tx_amp_from_power, 16'sd0};
+
+      delay_ctr <= reg_delay;
+      pw_ctr    <= reg_pulsewidth;
+      state     <= (reg_delay == 0) ? ST_BURST : ST_DELAY;
+    end
+  end
+end
 
       ST_DELAY: begin
         if (delay_ctr != 0)
@@ -239,27 +312,22 @@ always @(posedge clk) begin
       end
 
       ST_BURST: begin
-        // Burst is logically active
         fsm_burst_active <= 1'b1;
 
-        // 1) Handle pulsewidth counting based on actual visible samples
-        if (sample_fire && (pw_ctr != 0)) begin
-          pw_ctr <= pw_ctr - 1;
+        if (sample_fire && !tail_active) begin
+          if (pw_ctr > 1) begin
+            pw_ctr <= pw_ctr - 1;
+          end else begin
+            pw_ctr      <= 0;
+            tail_active <= 1'b1;
+            tail_ctr    <= PIPE_LATENCY[6:0];
+          end
         end
 
-        // 2) When pw_ctr reaches zero and we've seen at least one sample,
-        //    start the tail flush exactly once.
-        if (sample_fire && (pw_ctr == 0) && !tail_active) begin
-          tail_active <= 1'b1;
-          tail_ctr    <= PIPE_LATENCY[6:0];
-        end
-
-        // 3) Tail drain runs in *clock cycles*, independent of backpressure.
         if (tail_active) begin
           if (tail_ctr != 0)
             tail_ctr <= tail_ctr - 1;
           else begin
-            // Done flushing pipeline
             fsm_burst_active <= 1'b0;
             tail_active      <= 1'b0;
             state            <= ST_IDLE;
@@ -267,22 +335,21 @@ always @(posedge clk) begin
         end
       end
 
-
       default: begin
         state            <= ST_IDLE;
         fsm_burst_active <= 1'b0;
         tail_active      <= 1'b0;
+        peak_search_active <= 1'b0;
       end
 
     endcase
   end else begin
-    // Free-run mode
     state            <= ST_IDLE;
     fsm_burst_active <= 1'b0;
     tail_active      <= 1'b0;
+    peak_search_active <= 1'b0;
   end
 end
-
 
 
 // Track previous state to detect entering ST_BURST
@@ -412,26 +479,19 @@ always @(posedge clk) begin
   end
 end
 
-//----------------------------------------------
-// Core run-latch (prevents mid-packet abort)
-//----------------------------------------------
-reg core_run;
 
-always @(posedge clk) begin
-  if (rst)
-    core_run <= 1'b0;
-  else if (reg_enable)
-    core_run <= 1'b1;
-  else if (!use_trigger || !burst_active) begin
-    if (!pkt_active)
-      core_run <= 1'b0;
-  end
-end
 
 //----------------------------------------------
 // Final allow_output signal
 //----------------------------------------------
-wire allow_output = core_run & (use_trigger ? burst_active : 1'b1);
+wire allow_output = reg_enable & (use_trigger ? burst_active : 1'b1);
+wire axis_rx_tready;
+
+
+wire [31:0] repeat_tdata;
+wire        repeat_tvalid;
+assign repeat_tdata  = use_trigger ? trigger_sample : axis_round_tdata;
+assign repeat_tvalid = use_trigger ? allow_output    : axis_round_tvalid;
 
 //----------------------------------------------
 // Packetizer
@@ -446,9 +506,9 @@ axis_packetize #(
   .gate     (~allow_output),  // SAFE gating
   .size     (reg_spp),
 
-  .i_tdata  (axis_round_tdata),
-  .i_tvalid (axis_round_tvalid),
-  .i_tready (axis_round_tready),
+  .i_tdata  (repeat_tdata),
+  .i_tvalid (repeat_tvalid),
+  .i_tready (axis_rx_tready),
 
   .o_tdata  (m_tdata),
   .o_tlast  (m_tlast),

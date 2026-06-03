@@ -739,7 +739,7 @@ task automatic test_trigger_delay_burst_len(
 
   // Easy numbers to reason about
   delay_cycles = 200;   // ce_clk cycles
-  pw_samples   = 32;    // burst length (samples)
+  pw_samples   = 64;    // burst length (samples)
 
   write_reg(port_out, REG_ENABLE,     1);
   write_reg(port_out, REG_SPP,        64);
@@ -751,11 +751,18 @@ task automatic test_trigger_delay_burst_len(
   write_reg(port_out, REG_PULSEWIDTH, pw_samples[15:0]);
   write_reg(port_out, REG_DELAY,      delay_cycles);
 
-  // Build payload: many below-thr, 1 above-thr, then more below-thr
+  // Build payload: below-thr, then a real above-thr pulse, then below-thr
   tx.delete();
-  for (i = 0; i < 64; i++) tx.push_back(pack_iq(16'sd200, 16'sd0)); // below thr
-  tx.push_back(pack_iq(16'sd4000, 16'sd0));                         // trigger
-  for (i = 0; i < 31; i++) tx.push_back(pack_iq(16'sd200, 16'sd0)); // below thr
+
+for (i = 0; i < 64; i++)
+  tx.push_back(pack_iq(16'sd200, 16'sd0));
+
+for (i = 0; i < 300; i++)
+  tx.push_back(pack_iq(16'sd4000, 16'sd0));
+
+for (i = 0; i < 300; i++)
+  tx.push_back(pack_iq(16'sd200, 16'sd0));
+
   blk_ctrl.send_items(port_in, tx);
 
   // BEFORE delay expires: no output expected
@@ -764,7 +771,7 @@ task automatic test_trigger_delay_burst_len(
     "Output appeared before delay elapsed")
 
   // AFTER delay + margin: output must exist
-  #(CE_CLK_PER * (delay_cycles + WARMUP + pw_samples + 200));
+  #(CE_CLK_PER * (delay_cycles + WARMUP + pw_samples + 10000));
   `ASSERT_FATAL(blk_ctrl.num_received(port_out) > 0,
     "No output packet after trigger+delay")
 
@@ -798,23 +805,30 @@ endtask
 
 
 
-  // Test the min and max allowed values on all registers
-  task automatic test_registers(int port);
-    test.start_test($sformatf("Test registers (port %0d)", port), 1ms);
-    // REG_ENABLE and REG_WAVEFORM will be tested during the other tests
-    test_read_write_reg(port, REG_SPP,       {REG_SPP_LEN{1'b1}},       32'd16);
-    test_read_write_reg(port, REG_GAIN,      {REG_GAIN_LEN{1'b1}},      32'h7FFF);
-    test_read_write_reg(port, REG_CONSTANT,  {REG_CONSTANT_LEN{1'b1}},  32'h0);
-    test_read_write_reg(port, REG_PHASE_INC, {REG_PHASE_INC_LEN{1'b1}}, {REG_PHASE_INC_LEN{1'bX}});
-    test_read_write_reg(port, REG_CARTESIAN, {REG_CARTESIAN_LEN{1'b1}}, {REG_CARTESIAN_LEN{1'bX}});
-      // NEW (assuming you defined these in the .vh):
-    test_read_write_reg(port, REG_THRESHOLD,  {REG_THRESHOLD_LEN{1'b1}},  32'h0000_0000);
-    test_read_write_reg(port, REG_PULSEWIDTH, {REG_PULSEWIDTH_LEN{1'b1}}, 32'h0000_0020);
-    test_read_write_reg(port, REG_DELAY,      {REG_DELAY_LEN{1'b1}},      32'h0000_0000);
-    test_read_write_reg(port, REG_WARMUP,      {REG_WARMUP_LEN{1'b1}},      32'h0000_0000);
+task automatic test_registers(int port);
 
-    test.end_test();
-  endtask : test_registers
+  logic [31:0] dbg_avg_power_rb;
+
+  test.start_test($sformatf("Test registers (port %0d)", port), 1ms);
+
+  test_read_write_reg(port, REG_SPP,       {REG_SPP_LEN{1'b1}},       32'd16);
+  test_read_write_reg(port, REG_GAIN,      {REG_GAIN_LEN{1'b1}},      32'h7FFF);
+  test_read_write_reg(port, REG_CONSTANT,  {REG_CONSTANT_LEN{1'b1}},  32'h0);
+  test_read_write_reg(port, REG_PHASE_INC, {REG_PHASE_INC_LEN{1'b1}}, {REG_PHASE_INC_LEN{1'bX}});
+  test_read_write_reg(port, REG_CARTESIAN, {REG_CARTESIAN_LEN{1'b1}}, {REG_CARTESIAN_LEN{1'bX}});
+
+  test_read_write_reg(port, REG_THRESHOLD,  {REG_THRESHOLD_LEN{1'b1}},  32'h0000_0000);
+  test_read_write_reg(port, REG_PULSEWIDTH, {REG_PULSEWIDTH_LEN{1'b1}}, 32'h0000_0020);
+  test_read_write_reg(port, REG_DELAY,      {REG_DELAY_LEN{1'b1}},      32'h0000_0000);
+  test_read_write_reg(port, REG_WARMUP,     {REG_WARMUP_LEN{1'b1}},     32'h0000_0000);
+
+  read_reg(port, REG_DBG_AVG_POWER, dbg_avg_power_rb);
+
+  $display("DBG_AVG_POWER = %0d", dbg_avg_power_rb);
+
+  test.end_test();
+
+endtask
 
 
   // Run through all the waveform modes to make sure they work as expected

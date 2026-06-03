@@ -31,13 +31,8 @@ const uint32_t siggen_block_control::REG_THRESHOLD_OFFSET  = 0x1C;
 const uint32_t siggen_block_control::REG_PULSEWIDTH_OFFSET = 0x20;
 const uint32_t siggen_block_control::REG_DELAY_OFFSET       = 0x24;
 const uint32_t siggen_block_control::REG_HOLDCOUNT_OFFSET   = 0x28;
+const uint32_t siggen_block_control::REG_DBG_AVG_POWER_OFFSET = 0x2C;
 
-// 🔽 NEW debug layout, matching the Verilog .vh (all ≤ 0x3F)
-const uint32_t siggen_block_control::REG_DBG_FLAGS_OFFSET     = 0x2C; // dbg_ts_seen, etc.
-const uint32_t siggen_block_control::REG_DBG_CTRL_OFFSET      = 0x30; // clear
-const uint32_t siggen_block_control::REG_DBG_STATUS_OFFSET    = 0x34; // sticky+live bits
-const uint32_t siggen_block_control::REG_DBG_TS_NOW_LO_OFFSET = 0x38; // dbg_ts_now_trig[31:0]
-const uint32_t siggen_block_control::REG_DBG_TS_NOW_HI_OFFSET = 0x3C; // dbg_ts_now_trig[63:32]
 
 
 
@@ -170,11 +165,6 @@ public:
         return _prop_pulsewidth.at(port).get();
     }
     
-    
-    uint32_t get_dbg_status(const size_t port = 0) override
-{
-    return _siggen_reg_iface.peek32(REG_DBG_STATUS_OFFSET, port);
-}
 
     
     // setters/getters:
@@ -185,29 +175,11 @@ size_t get_holdcount(const size_t port) const override {
     return size_t(_prop_holdcount.at(port).get());
 }
 
-    // -------------------- DEBUG helpers --------------------
-    void clear_debug(const size_t port) override
-    {
-        _siggen_reg_iface.poke32(REG_DBG_CTRL_OFFSET, 0x1, port);
-    }
+uint32_t get_avg_power(const size_t port = 0) override
+{
+    return _siggen_reg_iface.peek32(REG_DBG_AVG_POWER_OFFSET, port);
+}
 
-    bool get_ts_seen(const size_t port) override
-    {
-        const uint32_t flags =
-            _siggen_reg_iface.peek32(REG_DBG_FLAGS_OFFSET, port);
-        return (flags & 0x1) != 0;
-    }
-
-
-
-    uint64_t get_trigger_timestamp(const size_t port) override
-    {
-        const uint32_t lo =
-            _siggen_reg_iface.peek32(REG_DBG_TS_NOW_LO_OFFSET, port);
-        const uint32_t hi =
-            _siggen_reg_iface.peek32(REG_DBG_TS_NOW_HI_OFFSET, port);
-        return (uint64_t(hi) << 32) | uint64_t(lo);
-    }
 
 
 

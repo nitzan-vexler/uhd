@@ -23,6 +23,10 @@
 #include <iostream>
 #include <thread>
 #include <uhd/rfnoc/siggen_block_control.hpp>
+#include <cmath>
+#include <iomanip>
+
+
 
 namespace po = boost::program_options;
 using uhd::rfnoc::radio_control;
@@ -54,15 +58,15 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     desc.add_options()
         ("help", "help message")
         ("args", po::value<std::string>(&args)->default_value(""), "UHD device address args")
-        ("spp", po::value<size_t>(&spp)->default_value(400), "Samples per packet (reduce for lower latency)")
-        ("threshold", po::value<size_t>(&threshold)->default_value(20000), "Samples per packet (reduce for lower latency)")
-        ("pw", po::value<size_t>(&pulsewidth)->default_value(400), "Samples per packet (reduce for lower latency)")
+        ("spp", po::value<size_t>(&spp)->default_value(64), "Samples per packet (reduce for lower latency)")
+        ("threshold", po::value<size_t>(&threshold)->default_value(1000), "Samples per packet (reduce for lower latency)")
+        ("pw", po::value<size_t>(&pulsewidth)->default_value(800), "Samples per packet (reduce for lower latency)")
         ("delay", po::value<size_t>(&delay)->default_value(8000), "Samples per packet (reduce for lower latency)")
         ("holdcount", po::value<size_t>(&holdcount)->default_value(2), "Samples per packet (reduce for lower latency)")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(200000000.0), "Rx RF center frequency in Hz")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(200000000.0), "Tx RF center frequency in Hz")
-        ("rx-gain", po::value<double>(&rx_gain)->default_value(45.0), "Rx RF center gain in Hz")
-        ("tx-gain", po::value<double>(&tx_gain)->default_value(45.0), "Tx RF center gain in Hz")
+        ("rx-gain", po::value<double>(&rx_gain)->default_value(50.0), "Rx RF center gain in Hz")
+        ("tx-gain", po::value<double>(&tx_gain)->default_value(70.0), "Tx RF center gain in Hz")
         ("rx-ant", po::value<std::string>(&rx_ant), "Receive antenna selection")
         ("tx-ant", po::value<std::string>(&tx_ant), "Transmit antenna selection")
         ("rx-blockid", po::value<std::string>(&rx_blockid)->default_value("0/Radio#0"), "Receive radio block ID")
@@ -140,7 +144,7 @@ siggen->set_sine_phase_increment(0, port);
 
 // Trigger gating (your new regs)
 siggen->set_threshold(threshold /*LSBs*/, port);   // pick based on RX magnitude
-siggen->set_holdcount(holdcount /*LSBs*/, port);   
+//siggen->set_holdcount(holdcount /*LSBs*/, port);   
 siggen->set_delay(delay /*ce_clk cycles*/, port);
 siggen->set_pulsewidth(pulsewidth /*samples*/, port);
     std::cout << "delay= " << siggen->get_delay(port) << " ce clk cycles " << std::endl;
@@ -328,76 +332,39 @@ siggen->set_enable(true, port);
     std::cout << "Issuing start stream cmd..." << std::endl;
     rx_radio_ctrl->issue_stream_cmd(stream_cmd, rx_chan);
     std::cout << "Wait..." << std::endl;
-  //  siggen->clear_debug(port);
-//std::this_thread::sleep_for(50ms);
 
-// We assume you already have:
-//auto tk = graph->get_mb_controller(rx_mb_idx)->get_timekeeper(rx_mb_idx);
-//const double fr = tk->get_tick_rate();
 
-//siggen->clear_debug(port);
-//std::this_thread::sleep_for(50ms);
 
-//bool saw_ts = false;
 
-// poll a bit in case the trigger happens a bit later
-//for (int i = 0; i < 100; i++) {
-   // bool ts_seen = siggen->get_ts_seen(port);
- //   std::cout << "[DEBUG] poll " << i << " ts_seen=" << ts_seen << std::endl;
+uint32_t last_val = 0;
 
-   // if (ts_seen) {
-     //   // ---------------- Trigger timestamp from SigGen ----------------
-     //   auto trig_ticks = siggen->get_trigger_timestamp(port);
-      //  double trig_sec = trig_ticks / fr;
+while (!stop_signal_called) {
 
-      //  std::cout << "Trigger TS (ticks): " << trig_ticks << "\n";
-     //   std::cout << "Trigger TS (sec):   " << trig_sec   << "\n";
+    uint32_t val = siggen->get_avg_power(port);
 
-        // ---------------- Radio timekeeper "now" ----------------
-     //   auto now_ts   = tk->get_time_now();
-     //   double now_s  = now_ts.get_full_secs() + now_ts.get_frac_secs();
-     //   double now_ticks = now_s * fr;
+    if (val != last_val) {
 
-      //  std::cout << "Radio now (ticks):  " << static_cast<uint64_t>(now_ticks)
-     //             << " (" << now_s << " s)\n";
-     //   std::cout << "Δ(now - trig) [ticks]: "
-     //             << static_cast<int64_t>(now_ticks - trig_ticks) << "\n";
+        uint16_t tx_amp = val & 0xFFFF;
 
-        // ---------------- DBG_STATUS from FPGA core ----------------
-     //   uint32_t status = siggen->get_dbg_status(port);
+        double tx_dbfs =
+            (tx_amp > 0)
+            ? 20.0 * std::log10((double)tx_amp / 32767.0)
+            : -200.0;
 
-     //   std::cout << "DBG_STATUS = 0x" << std::hex << status << std::dec << "\n";
-     //   std::cout << "  trigger_seen      = " << ((status >> 0) & 0x1) << "\n";
-     //   std::cout << "  burst_start_seen  = " << ((status >> 1) & 0x1) << "\n";
-     //   std::cout << "  burst_active      = " << ((status >> 2) & 0x1) << "\n";
-    //    std::cout << "  output_seen       = " << ((status >> 3) & 0x1) << "\n";
-     //   std::cout << "  use_trigger       = " << ((status >> 4) & 0x1) << "\n";
-     //   std::cout << "  ready_to_output   = " << ((status >> 5) & 0x1) << "\n";
-     //   std::cout << "  gate_closed       = " << ((status >> 6) & 0x1) << "\n";
-     //   std::cout << "  allow_output      = " << ((status >> 7) & 0x1) << "\n";
+        std::cout << "TX_AMP_FROM_POWER = "
+                  << tx_amp
+                  << " (0x" << std::hex << tx_amp << std::dec << ")"
+                  << "   TX_dBFS = "
+                  << std::fixed << std::setprecision(2)
+                  << tx_dbfs
+                  << " dBFS"
+                  << std::endl;
 
-      //  saw_ts = true;
-       // break;   // only print once; remove if you want it every poll
-   // }
-
-   // std::this_thread::sleep_for(10ms);
-//}
-
-//if (!saw_ts) {
-  //  std::cout << "no trigger timestamp seen" << std::endl;
-//}
-
-    // Wait until we can exit
-    uhd::time_spec_t elapsed_time = 0.0;
-    while (not stop_signal_called) {
-        std::this_thread::sleep_for(100ms);
-        if (total_time > 0.0) {
-            elapsed_time += 0.1;
-            if (elapsed_time > total_time) {
-                break;
-            }
-        }
+        last_val = val;
     }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
 
     // Stop radio
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;

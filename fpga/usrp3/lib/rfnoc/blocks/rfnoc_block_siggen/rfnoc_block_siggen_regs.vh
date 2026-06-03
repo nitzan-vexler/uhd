@@ -154,3 +154,6 @@ localparam        REG_DELAY_LEN      = 32;
 localparam REG_WARMUP   = 'h28;
 localparam REG_WARMUP_LEN      = 8;       // up to 255 samples is plenty
 
+localparam [19:0] REG_DBG_AVG_POWER = 20'h0002C;
+localparam        REG_DBG_AVG_POWER_LEN = 32;
+
