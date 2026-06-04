@@ -808,6 +808,7 @@ endtask
 task automatic test_registers(int port);
 
   logic [31:0] dbg_avg_power_rb;
+  logic [31:0] dbg_tx_amp_rb;
 
   test.start_test($sformatf("Test registers (port %0d)", port), 1ms);
 
@@ -820,11 +821,19 @@ task automatic test_registers(int port);
   test_read_write_reg(port, REG_THRESHOLD,  {REG_THRESHOLD_LEN{1'b1}},  32'h0000_0000);
   test_read_write_reg(port, REG_PULSEWIDTH, {REG_PULSEWIDTH_LEN{1'b1}}, 32'h0000_0020);
   test_read_write_reg(port, REG_DELAY,      {REG_DELAY_LEN{1'b1}},      32'h0000_0000);
-  test_read_write_reg(port, REG_WARMUP,     {REG_WARMUP_LEN{1'b1}},     32'h0000_0000);
 
+  // Debug registers are read-only
   read_reg(port, REG_DBG_AVG_POWER, dbg_avg_power_rb);
+  read_reg(port, REG_DBG_TX_AMP,    dbg_tx_amp_rb);
 
   $display("DBG_AVG_POWER = %0d", dbg_avg_power_rb);
+  $display("DBG_TX_AMP    = %0d", dbg_tx_amp_rb[15:0]);
+
+  `ASSERT_ERROR(dbg_avg_power_rb == 32'h0000_0000,
+    "REG_DBG_AVG_POWER should reset to 0");
+
+  `ASSERT_ERROR(dbg_tx_amp_rb[31:16] == 16'h0000,
+    "REG_DBG_TX_AMP upper 16 bits should be 0");
 
   test.end_test();
 

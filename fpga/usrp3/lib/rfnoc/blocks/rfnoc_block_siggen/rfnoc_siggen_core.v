@@ -64,6 +64,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
   reg [REG_DELAY_LEN-1:0]      reg_delay      = 32'd0;
   reg [REG_WARMUP_LEN-1:0]    reg_warmup;
   reg [31:0] dbg_avg_power;
+  reg [15:0] dbg_tx_amp;
 
   reg reg_phase_inc_stb;
   reg reg_cartesian_stb;
@@ -131,8 +132,8 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_THRESHOLD  : s_ctrlport_resp_data[REG_THRESHOLD_LEN-1:0]  <= reg_threshold;
           REG_PULSEWIDTH : s_ctrlport_resp_data[REG_PULSEWIDTH_LEN-1:0] <= reg_pulsewidth;
           REG_DELAY      : s_ctrlport_resp_data[REG_DELAY_LEN-1:0]      <= reg_delay;
-          REG_WARMUP      : s_ctrlport_resp_data[REG_WARMUP_LEN-1:0]      <= reg_warmup;
-          REG_DBG_AVG_POWER : s_ctrlport_resp_data <= {16'd0, tx_amp_from_power};
+          REG_DBG_AVG_POWER : s_ctrlport_resp_data <= dbg_avg_power;
+          REG_DBG_TX_AMP    : s_ctrlport_resp_data <= {16'd0, dbg_tx_amp};
         endcase
       end
     end
@@ -269,6 +270,8 @@ always @(posedge clk) begin
     trigger_sample     <= 32'd0;
     power_accum <= 48'd0;
     dbg_avg_power      <= 32'd0;   // MOVE HERE
+    dbg_tx_amp      <= 16'd0;   // MOVE HERE
+
 
 
   end else if (use_trigger) begin
@@ -294,6 +297,7 @@ power_accum <= power_accum_next;
       peak_cnt <= peak_cnt - 1;
     end else begin
       peak_search_active <= 1'b0;
+dbg_tx_amp <= tx_amp_from_power;
 dbg_avg_power <= avg_power_128[31:0];
 trigger_sample <= {tx_amp_from_power, 16'sd0};
 

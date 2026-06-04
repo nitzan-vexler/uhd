@@ -59,9 +59,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("help", "help message")
         ("args", po::value<std::string>(&args)->default_value(""), "UHD device address args")
         ("spp", po::value<size_t>(&spp)->default_value(64), "Samples per packet (reduce for lower latency)")
-        ("threshold", po::value<size_t>(&threshold)->default_value(1000), "Samples per packet (reduce for lower latency)")
-        ("pw", po::value<size_t>(&pulsewidth)->default_value(800), "Samples per packet (reduce for lower latency)")
-        ("delay", po::value<size_t>(&delay)->default_value(8000), "Samples per packet (reduce for lower latency)")
+        ("threshold", po::value<size_t>(&threshold)->default_value(1000), "Input pulse detection threshold (ADC counts)")
+        ("pw", po::value<size_t>(&pulsewidth)->default_value(800), "Transmit pulse width in samples")
+        ("delay", po::value<size_t>(&delay)->default_value(8000), "Delay from trigger to transmission in CE clock cycles")
         ("holdcount", po::value<size_t>(&holdcount)->default_value(2), "Samples per packet (reduce for lower latency)")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(200000000.0), "Rx RF center frequency in Hz")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(200000000.0), "Tx RF center frequency in Hz")
@@ -149,7 +149,18 @@ siggen->set_delay(delay /*ce_clk cycles*/, port);
 siggen->set_pulsewidth(pulsewidth /*samples*/, port);
     std::cout << "delay= " << siggen->get_delay(port) << " ce clk cycles " << std::endl;
     std::cout << "pulsewidth= " << siggen->get_pulsewidth(port) << " samples " << std::endl;
-    std::cout << "threshold= " << siggen->get_threshold(port) << " LSBs " << std::endl;
+const double thr_dbfs =
+    (threshold > 0)
+    ? 20.0 * std::log10((double)threshold / 32767.0)
+    : -200.0;
+
+std::cout << "threshold = "
+          << threshold
+          << " counts ("
+          << std::fixed << std::setprecision(2)
+          << thr_dbfs
+          << " dBFS)"
+          << std::endl;
    // std::cout << "holdcount= " << siggen->get_holdcount(port) << " samples for trigger " << std::endl;
     
     
@@ -336,31 +347,41 @@ siggen->set_enable(true, port);
 
 
 
-uint32_t last_val = 0;
+uint32_t last_avg_power = 0;
+uint32_t last_tx_amp    = 0;
 
 while (!stop_signal_called) {
 
-    uint32_t val = siggen->get_avg_power(port);
+    uint32_t avg_power = siggen->get_avg_power(port);
+    uint32_t tx_amp    = siggen->get_tx_amp(port) & 0xFFFF;
 
-    if (val != last_val) {
+    if ((avg_power != last_avg_power) || (tx_amp != last_tx_amp)) {
 
-        uint16_t tx_amp = val & 0xFFFF;
+        double rx_amp =
+            (avg_power > 0)
+            ? std::sqrt((double)avg_power)
+            : 0.0;
+
+        double rx_dbfs =
+            (rx_amp > 0.0)
+            ? 20.0 * std::log10(rx_amp / 32767.0)
+            : -200.0;
 
         double tx_dbfs =
             (tx_amp > 0)
             ? 20.0 * std::log10((double)tx_amp / 32767.0)
             : -200.0;
 
-        std::cout << "TX_AMP_FROM_POWER = "
-                  << tx_amp
-                  << " (0x" << std::hex << tx_amp << std::dec << ")"
-                  << "   TX_dBFS = "
-                  << std::fixed << std::setprecision(2)
-                  << tx_dbfs
-                  << " dBFS"
-                  << std::endl;
+        std::cout
+            << "RX_dBFS=" << std::fixed << std::setprecision(2)
+            << rx_dbfs
+            << " TX_dBFS=" << tx_dbfs
+            << " AVG_POWER=" << avg_power
+            << " TX_AMP=" << tx_amp
+            << std::endl;
 
-        last_val = val;
+        last_avg_power = avg_power;
+        last_tx_amp    = tx_amp;
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));

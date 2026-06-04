@@ -32,6 +32,7 @@ const uint32_t siggen_block_control::REG_PULSEWIDTH_OFFSET = 0x20;
 const uint32_t siggen_block_control::REG_DELAY_OFFSET       = 0x24;
 const uint32_t siggen_block_control::REG_HOLDCOUNT_OFFSET   = 0x28;
 const uint32_t siggen_block_control::REG_DBG_AVG_POWER_OFFSET = 0x2C;
+const uint32_t siggen_block_control::REG_DBG_TX_AMP_OFFSET = 0x30;
 
 
 
@@ -180,6 +181,10 @@ uint32_t get_avg_power(const size_t port = 0) override
     return _siggen_reg_iface.peek32(REG_DBG_AVG_POWER_OFFSET, port);
 }
 
+uint32_t get_tx_amp(const size_t port = 0) override
+{
+    return _siggen_reg_iface.peek32(REG_DBG_TX_AMP_OFFSET, port);
+}
 
 
 
