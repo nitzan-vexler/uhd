@@ -150,9 +150,8 @@ localparam        REG_PULSEWIDTH_LEN = 16;
 localparam [19:0] REG_DELAY      = 20'h00024;  // <-- yes, 0x24 is correct
 localparam        REG_DELAY_LEN      = 32;
 
-// rfnoc_siggen_regs.vh (or wherever you define regs)
-localparam REG_WARMUP   = 'h28;
-localparam REG_WARMUP_LEN      = 8;       // up to 255 samples is plenty
+localparam [19:0] REG_AVG_START_DELAY = 20'h00028;
+localparam        REG_AVG_START_DELAY_LEN = 8;
 
 localparam [19:0] REG_DBG_AVG_POWER = 20'h0002C;
 localparam        REG_DBG_AVG_POWER_LEN = 32;

@@ -30,7 +30,7 @@ const uint32_t siggen_block_control::REG_CARTESIAN_OFFSET = 0x18;
 const uint32_t siggen_block_control::REG_THRESHOLD_OFFSET  = 0x1C;
 const uint32_t siggen_block_control::REG_PULSEWIDTH_OFFSET = 0x20;
 const uint32_t siggen_block_control::REG_DELAY_OFFSET       = 0x24;
-const uint32_t siggen_block_control::REG_HOLDCOUNT_OFFSET   = 0x28;
+const uint32_t siggen_block_control::REG_AVG_START_DELAY_OFFSET   = 0x28;
 const uint32_t siggen_block_control::REG_DBG_AVG_POWER_OFFSET = 0x2C;
 const uint32_t siggen_block_control::REG_DBG_TX_AMP_OFFSET = 0x30;
 
@@ -47,7 +47,7 @@ const char* const PROP_KEY_SINE_PHASE_INC = "sine_phase_increment";
 const char* const PROP_KEY_THRESHOLD         = "threshold";
 const char* const PROP_KEY_PULSEWIDTH       = "pulsewidth";
 const char* const PROP_KEY_DELAY          = "delay";
-const char* const PROP_KEY_HOLDCOUNT      = "holdcount";
+const char* const PROP_KEY_AVG_START_DELAY = "avg_start_delay";
 
 namespace {
 template <class T>
@@ -169,11 +169,14 @@ public:
 
     
     // setters/getters:
-void set_holdcount(const size_t holdcount, const size_t port) override {
-    set_property<int>(PROP_KEY_HOLDCOUNT, int(holdcount), port);
+void set_avg_start_delay(const size_t delay, const size_t port) override
+{
+    set_property<int>(PROP_KEY_AVG_START_DELAY, int(delay), port);
 }
-size_t get_holdcount(const size_t port) const override {
-    return size_t(_prop_holdcount.at(port).get());
+
+size_t get_avg_start_delay(const size_t port) const override
+{
+    return size_t(_prop_avg_start_delay.at(port).get());
 }
 
 uint32_t get_avg_power(const size_t port = 0) override
@@ -206,7 +209,7 @@ private:
 _prop_threshold.reserve(num_outputs);
 _prop_pulsewidth.reserve(num_outputs);
 _prop_delay.reserve(num_outputs);
-_prop_holdcount.reserve(num_outputs);
+_prop_avg_start_delay.reserve(num_outputs);
 
 
 
@@ -303,10 +306,15 @@ _prop_holdcount.reserve(num_outputs);
 				_siggen_reg_iface.poke32(REG_DELAY_OFFSET, dly, port);
 			});
             
-            _prop_holdcount.emplace_back(property_t<int>{PROP_KEY_HOLDCOUNT, 0, {res_source_info::USER, port}});
-register_property(&_prop_holdcount.back(), [this, port]() {
-    int w = _prop_holdcount.at(port).get();
-    _siggen_reg_iface.poke32(REG_HOLDCOUNT_OFFSET, uint32_t(w), port);
+_prop_avg_start_delay.emplace_back(property_t<int>{
+    PROP_KEY_AVG_START_DELAY, 32, {res_source_info::USER, port}});
+
+register_property(&_prop_avg_start_delay.back(), [this, port]() {
+    int avg_delay = _prop_avg_start_delay.at(port).get();
+    _siggen_reg_iface.poke32(
+        REG_AVG_START_DELAY_OFFSET,
+        uint32_t(avg_delay),
+        port);
 });
 
             add_property_resolver({&_prop_waveform.back(), &_prop_amplitude.back()},
@@ -445,7 +453,7 @@ register_property(&_prop_holdcount.back(), [this, port]() {
     std::vector<property_t<double>> _prop_threshold;
     std::vector<property_t<double>> _prop_pulsewidth;
     std::vector<property_t<double>> _prop_delay;
-    std::vector<property_t<int>> _prop_holdcount;
+    std::vector<property_t<int>> _prop_avg_start_delay;
 
 
     /**************************************************************************

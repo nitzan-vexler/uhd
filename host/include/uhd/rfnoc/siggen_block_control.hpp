@@ -42,7 +42,7 @@ public:
 static const uint32_t REG_THRESHOLD_OFFSET;   // 0x1C
 static const uint32_t REG_PULSEWIDTH_OFFSET;  // 0x20
 static const uint32_t REG_DELAY_OFFSET;       // 0x24
-static const uint32_t REG_HOLDCOUNT_OFFSET;
+static const uint32_t REG_AVG_START_DELAY_OFFSET;
 static const uint32_t REG_DBG_AVG_POWER_OFFSET;
 static const uint32_t REG_DBG_TX_AMP_OFFSET;
 
@@ -213,8 +213,8 @@ virtual void   set_delay(const double delay, const size_t port) = 0;
 virtual double get_delay(const size_t port) const = 0;
 
 // siggen_block_control.hpp (public API)
-virtual void set_holdcount(const size_t warmup, const size_t port) = 0;
-virtual size_t get_holdcount(const size_t port) const = 0;
+virtual void set_avg_start_delay(const size_t delay, const size_t port) = 0;
+virtual size_t get_avg_start_delay(const size_t port) const = 0;
 
 virtual uint32_t get_avg_power(const size_t port = 0) = 0;
 

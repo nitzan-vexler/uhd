@@ -48,7 +48,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
 {
     // variables to be set by po
     std::string args, rx_ant, tx_ant, rx_blockid, tx_blockid, ref, pps;
-    size_t total_num_samps, spp, rx_chan, tx_chan, threshold, pulsewidth, delay, holdcount;
+    size_t total_num_samps, spp, rx_chan, tx_chan, threshold, pulsewidth, delay, avg_delay;
     double rate, rx_freq, tx_freq, rx_gain, tx_gain, rx_bw, tx_bw, total_time, setup_time;
     bool rx_timestamps;
 
@@ -62,7 +62,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("threshold", po::value<size_t>(&threshold)->default_value(1000), "Input pulse detection threshold (ADC counts)")
         ("pw", po::value<size_t>(&pulsewidth)->default_value(800), "Transmit pulse width in samples")
         ("delay", po::value<size_t>(&delay)->default_value(8000), "Delay from trigger to transmission in CE clock cycles")
-        ("holdcount", po::value<size_t>(&holdcount)->default_value(2), "Samples per packet (reduce for lower latency)")
+        ("avg-delay",po::value<size_t>(&avg_delay)->default_value(32),"Samples to wait after trigger before averaging")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(200000000.0), "Rx RF center frequency in Hz")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(200000000.0), "Tx RF center frequency in Hz")
         ("rx-gain", po::value<double>(&rx_gain)->default_value(50.0), "Rx RF center gain in Hz")
@@ -139,8 +139,9 @@ const size_t port = 0;
 const double tone_hz = 0;                 
 siggen->set_samples_per_packet(spp, port);
 siggen->set_waveform(uhd::rfnoc::siggen_waveform::SINE_WAVE, port);
-siggen->set_amplitude(0.5, port);             // 0.0 .. 1.0
+siggen->set_amplitude(1, port);             // 0.0 .. 1.0
 siggen->set_sine_phase_increment(0, port);
+siggen->set_avg_start_delay(avg_delay, port);
 
 // Trigger gating (your new regs)
 siggen->set_threshold(threshold /*LSBs*/, port);   // pick based on RX magnitude
@@ -161,11 +162,26 @@ std::cout << "threshold = "
           << thr_dbfs
           << " dBFS)"
           << std::endl;
-   // std::cout << "holdcount= " << siggen->get_holdcount(port) << " samples for trigger " << std::endl;
-    
-    
 
+    
+std::cout << "avg_start_delay = "
+          << siggen->get_avg_start_delay(port)
+          << " samples"
+          << std::endl;
 
+std::cout << "Actual RX BW: "
+          << rx_radio_ctrl->get_rx_bandwidth(rx_chan)
+          << " Hz" << std::endl;
+
+std::cout << "Actual TX BW: "
+          << tx_radio_ctrl->get_tx_bandwidth(tx_chan)
+          << " Hz" << std::endl;
+          
+std::cout << "avg_start_delay = "
+          << siggen->get_avg_start_delay(port)
+          << " samples"
+          << std::endl;
+          
 // Finally enable the generator
 siggen->set_enable(true, port);
 

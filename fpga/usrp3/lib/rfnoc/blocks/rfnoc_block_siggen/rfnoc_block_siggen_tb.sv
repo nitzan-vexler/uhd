@@ -790,21 +790,6 @@ endtask
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 task automatic test_registers(int port);
 
   logic [31:0] dbg_avg_power_rb;
@@ -821,6 +806,12 @@ task automatic test_registers(int port);
   test_read_write_reg(port, REG_THRESHOLD,  {REG_THRESHOLD_LEN{1'b1}},  32'h0000_0000);
   test_read_write_reg(port, REG_PULSEWIDTH, {REG_PULSEWIDTH_LEN{1'b1}}, 32'h0000_0020);
   test_read_write_reg(port, REG_DELAY,      {REG_DELAY_LEN{1'b1}},      32'h0000_0000);
+  test_read_write_reg(
+  port,
+  REG_AVG_START_DELAY,
+  {REG_AVG_START_DELAY_LEN{1'b1}},
+  32'h0000_0020
+);
 
   // Debug registers are read-only
   read_reg(port, REG_DBG_AVG_POWER, dbg_avg_power_rb);
