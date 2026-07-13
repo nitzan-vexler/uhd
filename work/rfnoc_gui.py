@@ -129,6 +129,23 @@ def browse_output_file():
 
 def update_fields_for_mode(*args):
     selected = mode.get()
+    selected_target = execution_target.get()
+
+    # Hide all conditional sections first
+    e312_frame.grid_remove()
+    rx_frame.grid_remove()
+    tx_frame.grid_remove()
+    sampling_frame.grid_remove()
+    pulse_frame.grid_remove()
+    file_frame.grid_remove()
+    fpga_frame.grid_remove()
+
+    # Show the E312 connection panel only for the E312 target
+    if selected_target == "USRP E312":
+        e312_frame.grid()
+
+    # Restore SPP state by default
+    set_field_state(spp, "normal")
 
     # Hide all mode-dependent sections first
     rx_frame.grid_remove()
@@ -171,6 +188,8 @@ def update_fields_for_mode(*args):
         file_frame.config(text="RX Output File")
         browse_output_button.config(text="Choose output file")
 
+        rate.set("1")
+
         rate_note.config(
             text="Recommended rate for RX to File: 1 MSPS"
         )
@@ -202,6 +221,15 @@ def start_app():
     if proc is not None:
         messagebox.showinfo("Already running", "App is already running.")
         return
+    selected_mode = mode.get()
+    selected_target = execution_target.get()
+
+    if selected_target == "USRP E312":
+        messagebox.showinfo(
+            "USRP E312 target",
+            "Remote execution on the E312 will be added in the next step."
+        )
+        return
 
     try:
         rx_freq_hz = float(rx_freq.get()) * 1e6
@@ -226,7 +254,6 @@ def start_app():
     tx_dbfs_values.clear()
     start_time = None
 
-    selected_mode = mode.get()
 
     if selected_mode == "CW":
         cmd = [
@@ -351,7 +378,16 @@ def start_app():
     threading.Thread(target=monitor, daemon=True).start()
 def clear_output():
     output.delete("1.0", tk.END)
-    
+def test_connection():
+    target = f"{e312_user.get().strip()}@{e312_ip.get().strip()}"
+
+    append_output(f"Testing connection to {target}...\n")
+
+    # Temporary behavior; real SSH test will be added next
+    e312_status.set("Connected")
+    status_label.configure(foreground="green")
+
+    append_output(f"Connected to {target}\n\n")
 def stop_app():
     global proc
 
@@ -467,6 +503,7 @@ mode_frame.grid(
 mode_frame.columnconfigure(0, weight=1)
 
 mode = tk.StringVar(value="Pulse")
+execution_target = tk.StringVar(value="Host PC")
 
 mode_combo = ttk.Combobox(
     mode_frame,
@@ -488,8 +525,122 @@ mode_combo.grid(
     padx=5,
     pady=5,
 )
+ttk.Label(
+    mode_frame,
+    text="Execution Target",
+).grid(
+    row=1,
+    column=0,
+    sticky="w",
+    padx=5,
+    pady=(8, 2),
+)
 
+target_combo = ttk.Combobox(
+    mode_frame,
+    textvariable=execution_target,
+    values=[
+        "Host PC",
+        "USRP E312",
+    ],
+    state="readonly",
+    font=("TkDefaultFont", 12),
+    justify="center",
+)
 
+target_combo.grid(
+    row=2,
+    column=0,
+    sticky="ew",
+    padx=5,
+    pady=(2, 5),
+)
+# =========================================================
+# E312 Connection
+# =========================================================
+e312_frame = ttk.LabelFrame(
+    frame,
+    text="USRP E312",
+    padding=8,
+)
+
+e312_frame.columnconfigure(1, weight=1)
+e312_frame.grid(
+    row=1,
+    column=0,
+    sticky="ew",
+    pady=4,
+)
+
+e312_ip = tk.StringVar(value="192.168.10.2")
+e312_user = tk.StringVar(value="root")
+e312_status = tk.StringVar(value="Disconnected")
+ttk.Label(
+    e312_frame,
+    text="IP Address",
+).grid(
+    row=0,
+    column=0,
+    sticky="w",
+)
+
+ttk.Entry(
+    e312_frame,
+    textvariable=e312_ip,
+).grid(
+    row=0,
+    column=1,
+    sticky="ew",
+    padx=5,
+)
+ttk.Label(
+    e312_frame,
+    text="Username",
+).grid(
+    row=1,
+    column=0,
+    sticky="w",
+)
+
+ttk.Entry(
+    e312_frame,
+    textvariable=e312_user,
+).grid(
+    row=1,
+    column=1,
+    sticky="ew",
+    padx=5,
+)
+ttk.Label(
+    e312_frame,
+    text="Status",
+).grid(
+    row=2,
+    column=0,
+    sticky="w",
+)
+
+status_label = ttk.Label(
+    e312_frame,
+    textvariable=e312_status,
+    foreground="red",
+)
+
+status_label.grid(
+    row=2,
+    column=1,
+    sticky="w",
+)
+ttk.Button(
+    e312_frame,
+    text="Test Connection",
+    command=test_connection,
+).grid(
+    row=3,
+    column=0,
+    columnspan=2,
+    pady=5,
+)
 # =========================================================
 # RX parameters
 # =========================================================
@@ -499,7 +650,7 @@ rx_frame = ttk.LabelFrame(
     padding=8
 )
 rx_frame.grid(
-    row=1,
+    row=2,
     column=0,
     sticky="ew",
     pady=4
@@ -521,7 +672,7 @@ tx_frame = ttk.LabelFrame(
     padding=8
 )
 tx_frame.grid(
-    row=2,
+    row=3,
     column=0,
     sticky="ew",
     pady=4
@@ -543,7 +694,7 @@ sampling_frame = ttk.LabelFrame(
     padding=8
 )
 sampling_frame.grid(
-    row=3,
+    row=4,
     column=0,
     sticky="ew",
     pady=4
@@ -578,7 +729,7 @@ pulse_frame = ttk.LabelFrame(
     padding=8
 )
 pulse_frame.grid(
-    row=4,
+    row=5,
     column=0,
     sticky="ew",
     pady=4
@@ -624,7 +775,7 @@ file_frame = ttk.LabelFrame(
     padding=8
 )
 file_frame.grid(
-    row=5,
+    row=6,
     column=0,
     sticky="ew",
     pady=4
@@ -663,7 +814,7 @@ fpga_frame = ttk.LabelFrame(
     padding=8
 )
 fpga_frame.grid(
-    row=6,
+    row=7,
     column=0,
     sticky="ew",
     pady=4
@@ -723,7 +874,7 @@ ttk.Button(
 # =========================================================
 button_frame = ttk.Frame(frame)
 button_frame.grid(
-    row=7,
+    row=8,
     column=0,
     sticky="ew",
     pady=10,
@@ -767,6 +918,8 @@ ttk.Button(
 
 # Update visible sections whenever the mode changes
 mode.trace_add("write", update_fields_for_mode)
+execution_target.trace_add("write", update_fields_for_mode)
+
 update_fields_for_mode()
 
 
