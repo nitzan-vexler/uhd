@@ -84,16 +84,45 @@ def add_field(parent, row, label, default):
     ttk.Entry(parent, textvariable=var, width=24).grid(row=row, column=1, sticky="ew", padx=4, pady=3)
     return var
 def set_field_state(var, state):
-    for widget in frame.winfo_children():
-        if isinstance(widget, ttk.Entry) and widget.cget("textvariable") == str(var):
-            widget.configure(state=state)
+    def search(parent):
+        for widget in parent.winfo_children():
+            if (
+                isinstance(widget, ttk.Entry)
+                and widget.cget("textvariable") == str(var)
+            ):
+                widget.configure(state=state)
+                return True
+
+            if search(widget):
+                return True
+
+        return False
+
+    search(frame)
 
 def browse_output_file():
-    filename = filedialog.asksaveasfilename(
-        title="Select output file",
-        defaultextension=".dat",
-        filetypes=[("Binary files", "*.dat"), ("All files", "*.*")]
-    )
+    selected_mode = mode.get()
+
+    if selected_mode == "Convert to CSV":
+        filename = filedialog.askopenfilename(
+            title="Select binary file to convert",
+            initialdir=os.path.dirname(rx_output.get()),
+            filetypes=[
+                ("Binary files", "*.dat"),
+                ("All files", "*.*"),
+            ],
+        )
+    else:
+        filename = filedialog.asksaveasfilename(
+            title="Select output file",
+            initialdir=os.path.dirname(rx_output.get()),
+            initialfile=os.path.basename(rx_output.get()),
+            defaultextension=".dat",
+            filetypes=[
+                ("Binary files", "*.dat"),
+                ("All files", "*.*"),
+            ],
+        )
 
     if filename:
         rx_output.set(filename)
@@ -101,55 +130,56 @@ def browse_output_file():
 def update_fields_for_mode(*args):
     selected = mode.get()
 
-    # enable all first
-    all_fields = [
-        rx_freq, tx_freq, rx_gain, tx_gain,
-        threshold, avg_delay, delay, pulsewidth,
-        spp, rate, rx_bw, tx_bw, bitfile,
-        rx_output,
-    ]
+    # Hide all mode-dependent sections first
+    rx_frame.grid_remove()
+    tx_frame.grid_remove()
+    sampling_frame.grid_remove()
+    pulse_frame.grid_remove()
+    file_frame.grid_remove()
+    fpga_frame.grid_remove()
 
-    for field in all_fields:
-        set_field_state(field, "normal")
+    # Restore SPP state by default
+    set_field_state(spp, "normal")
 
-    if selected == "CW":
-        disabled = [
-            rx_freq, rx_gain, threshold,
-            avg_delay, delay, pulsewidth,
-            spp, rx_bw, bitfile,
-            rx_output,
-        ]
+    if selected == "Pulse":
+        rx_frame.grid()
+        tx_frame.grid()
+        sampling_frame.grid()
+        pulse_frame.grid()
+        fpga_frame.grid()
+
+        rate_note.config(
+            text="Recommended rate for Pulse mode: 60 MSPS"
+        )
+
+    elif selected == "CW":
+        tx_frame.grid()
+        sampling_frame.grid()
+
+        # CW uses rate but does not use SPP
+        set_field_state(spp, "disabled")
+
+        rate_note.config(
+            text="CW uses TX frequency, TX gain, TX BW and sample rate"
+        )
 
     elif selected == "RX to File":
-        disabled = [
-            tx_freq, tx_gain,
-            avg_delay, delay, pulsewidth,
-            tx_bw, bitfile,
-        ]
+        rx_frame.grid()
+        sampling_frame.grid()
+        file_frame.grid()
+
+        file_frame.config(text="RX Output File")
+        browse_output_button.config(text="Choose output file")
+
+        rate_note.config(
+            text="Recommended rate for RX to File: 1 MSPS"
+        )
 
     elif selected == "Convert to CSV":
-        disabled = [
-            rx_freq, tx_freq,
-            rx_gain, tx_gain,
-            threshold,
-            avg_delay,
-            delay,
-            pulsewidth,
-            spp,
-            rate,
-            rx_bw,
-            tx_bw,
-            bitfile,
-            # Don't disable rx_output
-        ]
+        file_frame.grid()
 
-    else:  # Pulse
-        disabled = [
-            rx_output,
-        ]
-
-    for field in disabled:
-        set_field_state(field, "disabled")
+        file_frame.config(text="Binary File to Convert")
+        browse_output_button.config(text="Choose input .dat file")
 
 def append_output(text):
     output.insert(tk.END, text)
@@ -389,106 +419,421 @@ def update_fpga():
 root = tk.Tk()
 root.title("SDR GUI")
 
-frame = ttk.Frame(root, padding=10)
-frame.grid(row=0, column=0, sticky="nsew")
+# Left side: controls
+# Right side: plot and terminal
+root.columnconfigure(0, weight=3, minsize=800)
+root.columnconfigure(1, weight=2, minsize=600)
+root.rowconfigure(0, weight=1)
 
-# =========================
-# Operation mode - TOP
-# =========================
-mode_frame = ttk.LabelFrame(frame, text="Operation Mode", padding=10)
-mode_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+frame = ttk.Frame(root, padding=10)
+frame.grid(
+    row=0,
+    column=0,
+    sticky="nsew",
+)
+
+frame.columnconfigure(0, weight=1)
+
+right_frame = ttk.Frame(root, padding=(0, 10, 10, 10))
+right_frame.grid(
+    row=0,
+    column=1,
+    sticky="nsew",
+)
+
+right_frame.columnconfigure(0, weight=1)
+
+# Plot keeps a compact height.
+# Terminal receives the extra vertical space.
+right_frame.rowconfigure(0, weight=0)
+right_frame.rowconfigure(1, weight=1)
+
+
+# =========================================================
+# Operation mode
+# =========================================================
+mode_frame = ttk.LabelFrame(
+    frame,
+    text="Operation Mode",
+    padding=12
+)
+mode_frame.grid(
+    row=0,
+    column=0,
+    sticky="ew",
+    pady=(0, 10)
+)
+
+mode_frame.columnconfigure(0, weight=1)
 
 mode = tk.StringVar(value="Pulse")
 
 mode_combo = ttk.Combobox(
     mode_frame,
     textvariable=mode,
-    values=["Pulse", "CW", "RX to File", "Convert to CSV"],
+    values=[
+        "Pulse",
+        "CW",
+        "RX to File",
+        "Convert to CSV",
+    ],
     state="readonly",
-    font=("TkDefaultFont", 13),
-    width=28
+    font=("TkDefaultFont", 14),
+    justify="center",
 )
-mode_combo.pack(fill="x")
+mode_combo.grid(
+    row=0,
+    column=0,
+    sticky="ew",
+    padx=5,
+    pady=5,
+)
 
-# =========================
-# RF parameters
-# =========================
-rx_freq = add_field(frame, 1, "RX freq [MHz]", "200")
-tx_freq = add_field(frame, 2, "TX freq [MHz]", "200")
-rx_gain = add_field(frame, 3, "RX gain [dB]", "10")
-tx_gain = add_field(frame, 4, "TX gain [dB]", "70")
-threshold = add_field(frame, 5, "Threshold [dBFS]", "-30")
-avg_delay = add_field(frame, 6, "Avg start delay [samples]", "32")
-delay = add_field(frame, 7, "Delay [us]", "100")
-pulsewidth = add_field(frame, 8, "Pulse width [us]", "10")
-spp = add_field(frame, 9, "SPP", "64")
-rate = add_field(frame, 10, "Rate [Msps]", "60")
 
-ttk.Label(
+# =========================================================
+# RX parameters
+# =========================================================
+rx_frame = ttk.LabelFrame(
     frame,
-    text="Recommended: Pulse = 60 MSPS, RX to File = 1 MSPS",
-    foreground="#0066CC"
-).grid(row=11, column=1, sticky="w", padx=4)
+    text="RX Parameters",
+    padding=8
+)
+rx_frame.grid(
+    row=1,
+    column=0,
+    sticky="ew",
+    pady=4
+)
 
-rx_bw = add_field(frame, 12, "RX BW [MHz]", "1")
-tx_bw = add_field(frame, 13, "TX BW [MHz]", "1")
-bitfile = add_field(frame, 14, "FPGA bitfile", "./e31x.bit")
-ttk.Label(
+rx_frame.columnconfigure(1, weight=1)
+
+rx_freq = add_field(rx_frame, 0, "RX freq [MHz]", "200")
+rx_gain = add_field(rx_frame, 1, "RX gain [dB]", "10")
+rx_bw = add_field(rx_frame, 2, "RX BW [MHz]", "1")
+
+
+# =========================================================
+# TX parameters
+# =========================================================
+tx_frame = ttk.LabelFrame(
     frame,
-    text="Update according to the desired pulse: Relative/Fixed Power",
-    foreground="#0066CC"
-).grid(row=15, column=1, sticky="w", padx=4)
+    text="TX Parameters",
+    padding=8
+)
+tx_frame.grid(
+    row=2,
+    column=0,
+    sticky="ew",
+    pady=4
+)
+
+tx_frame.columnconfigure(1, weight=1)
+
+tx_freq = add_field(tx_frame, 0, "TX freq [MHz]", "200")
+tx_gain = add_field(tx_frame, 1, "TX gain [dB]", "70")
+tx_bw = add_field(tx_frame, 2, "TX BW [MHz]", "1")
+
+
+# =========================================================
+# Sampling parameters
+# =========================================================
+sampling_frame = ttk.LabelFrame(
+    frame,
+    text="Sampling Parameters",
+    padding=8
+)
+sampling_frame.grid(
+    row=3,
+    column=0,
+    sticky="ew",
+    pady=4
+)
+
+sampling_frame.columnconfigure(1, weight=1)
+
+rate = add_field(sampling_frame, 0, "Rate [MSPS]", "60")
+spp = add_field(sampling_frame, 1, "SPP", "64")
+
+rate_note = ttk.Label(
+    sampling_frame,
+    text="Recommended rate for Pulse mode: 60 MSPS",
+    foreground="#0066CC",
+)
+rate_note.grid(
+    row=2,
+    column=0,
+    columnspan=2,
+    sticky="w",
+    padx=4,
+    pady=(2, 4),
+)
+
+
+# =========================================================
+# Pulse parameters
+# =========================================================
+pulse_frame = ttk.LabelFrame(
+    frame,
+    text="Pulse Parameters",
+    padding=8
+)
+pulse_frame.grid(
+    row=4,
+    column=0,
+    sticky="ew",
+    pady=4
+)
+
+pulse_frame.columnconfigure(1, weight=1)
+
+threshold = add_field(
+    pulse_frame,
+    0,
+    "Threshold [dBFS]",
+    "-30"
+)
+
+avg_delay = add_field(
+    pulse_frame,
+    1,
+    "Avg start delay [samples]",
+    "32"
+)
+
+delay = add_field(
+    pulse_frame,
+    2,
+    "Delay [us]",
+    "100"
+)
+
+pulsewidth = add_field(
+    pulse_frame,
+    3,
+    "Pulse width [us]",
+    "10"
+)
+
+
+# =========================================================
+# File parameters
+# =========================================================
+file_frame = ttk.LabelFrame(
+    frame,
+    text="RX Output File",
+    padding=8
+)
+file_frame.grid(
+    row=5,
+    column=0,
+    sticky="ew",
+    pady=4
+)
+
+file_frame.columnconfigure(1, weight=1)
 
 rx_output = add_field(
+    file_frame,
+    0,
+    "File path",
+    os.path.expanduser(
+        "~/workarea/uhd/work/build/usrp_samples.dat"
+    ),
+)
+
+browse_output_button = ttk.Button(
+    file_frame,
+    text="Choose output file",
+    command=browse_output_file,
+)
+browse_output_button.grid(
+    row=1,
+    column=0,
+    columnspan=2,
+    pady=5,
+)
+
+
+# =========================================================
+# FPGA configuration
+# =========================================================
+fpga_frame = ttk.LabelFrame(
     frame,
-    17,
-    "Data File",
-    os.path.expanduser("~/workarea/uhd/work/build/usrp_samples.dat")
+    text="FPGA Configuration",
+    padding=8
+)
+fpga_frame.grid(
+    row=6,
+    column=0,
+    sticky="ew",
+    pady=4
+)
+
+fpga_frame.columnconfigure(1, weight=1)
+
+bitfile = add_field(
+    fpga_frame,
+    0,
+    "FPGA bitfile",
+    "./e31x.bit"
+)
+
+ttk.Label(
+    fpga_frame,
+    text="Select the bitfile according to Relative or Fixed Power mode",
+    foreground="#0066CC",
+).grid(
+    row=1,
+    column=0,
+    columnspan=2,
+    sticky="w",
+    padx=4,
+    pady=3,
+)
+
+fpga_button_frame = ttk.Frame(fpga_frame)
+fpga_button_frame.grid(
+    row=2,
+    column=0,
+    columnspan=2,
+    pady=5,
 )
 
 ttk.Button(
-    frame,
-    text="Browse output file",
-    command=browse_output_file
-).grid(row=18, column=0, columnspan=2, pady=4)
+    fpga_button_frame,
+    text="Browse bitfile",
+    command=browse_bitfile,
+).pack(
+    side=tk.LEFT,
+    padx=5,
+)
 
-# =========================
-# FPGA buttons
-# =========================
-ttk.Button(frame, text="Browse bitfile", command=browse_bitfile).grid(row=16, column=0, pady=6)
-ttk.Button(frame, text="Update FPGA", command=update_fpga).grid(row=16, column=1, pady=6)
+ttk.Button(
+    fpga_button_frame,
+    text="Update FPGA",
+    command=update_fpga,
+).pack(
+    side=tk.LEFT,
+    padx=5,
+)
 
-# =========================
-# Main buttons
-# =========================
+
+# =========================================================
+# Main controls
+# =========================================================
 button_frame = ttk.Frame(frame)
-button_frame.grid(row=19, column=0, columnspan=2, pady=10)
+button_frame.grid(
+    row=7,
+    column=0,
+    sticky="ew",
+    pady=10,
+)
 
-ttk.Button(button_frame, text="Start", command=start_app).pack(side=tk.LEFT, padx=5)
-ttk.Button(button_frame, text="Stop", command=stop_app).pack(side=tk.LEFT, padx=5)
-ttk.Button(button_frame, text="Clear Log", command=clear_output).pack(side=tk.LEFT, padx=5)
+button_frame.columnconfigure((0, 1, 2), weight=1)
 
+ttk.Button(
+    button_frame,
+    text="Start",
+    command=start_app,
+).grid(
+    row=0,
+    column=0,
+    padx=5,
+    sticky="ew",
+)
+
+ttk.Button(
+    button_frame,
+    text="Stop",
+    command=stop_app,
+).grid(
+    row=0,
+    column=1,
+    padx=5,
+    sticky="ew",
+)
+
+ttk.Button(
+    button_frame,
+    text="Clear Log",
+    command=clear_output,
+).grid(
+    row=0,
+    column=2,
+    padx=5,
+    sticky="ew",
+)
+
+
+# Update visible sections whenever the mode changes
 mode.trace_add("write", update_fields_for_mode)
 update_fields_for_mode()
 
-output = tk.Text(root, width=110, height=32)
-output.grid(row=1, column=0, padx=10, pady=10)
-# Plot 1: long-term tracking
-fig1 = Figure(figsize=(8, 3), dpi=100)
+
+# =========================================================
+# Plot - upper right
+# =========================================================
+plot_frame = ttk.LabelFrame(
+    right_frame,
+    text="RX/TX Amplitude Tracking",
+    padding=5,
+)
+plot_frame.grid(
+    row=0,
+    column=0,
+    sticky="ew",
+    pady=(0, 8),
+)
+
+plot_frame.columnconfigure(0, weight=1)
+
+fig1 = Figure(figsize=(7, 4), dpi=100)
 ax = fig1.add_subplot(111)
 
 ax.set_xlabel("Time [s]")
 ax.set_ylabel("dBFS")
-ax.set_title("RX/TX amplitude tracking")
 ax.grid(True)
 
-canvas1 = FigureCanvasTkAgg(fig1, master=root)
+canvas1 = FigureCanvasTkAgg(
+    fig1,
+    master=plot_frame,
+)
+
 canvas1.get_tk_widget().grid(
     row=0,
-    column=3,
-    padx=10,
-    pady=10,
-    sticky="nsew"
+    column=0,
+    sticky="ew",
+)
+
+
+# =========================================================
+# Terminal - lower right
+# =========================================================
+log_frame = ttk.LabelFrame(
+    right_frame,
+    text="Application Log",
+    padding=5,
+)
+log_frame.grid(
+    row=1,
+    column=0,
+    sticky="nsew",
+)
+
+log_frame.columnconfigure(0, weight=1)
+log_frame.rowconfigure(0, weight=1)
+
+output = tk.Text(
+    log_frame,
+    width=75,
+    height=20,
+    wrap="none",
+)
+
+output.grid(
+    row=0,
+    column=0,
+    sticky="nsew",
 )
 
 
