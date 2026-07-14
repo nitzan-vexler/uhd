@@ -3,3 +3,7 @@ debian
 *swp
 *.pyc
 .DS_Store
+
+# Local ARM build directories
+/build-arm/
+/work/build-e312/

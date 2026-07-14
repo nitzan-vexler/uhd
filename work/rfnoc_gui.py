@@ -9,7 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 import re
 import time
 from collections import deque
-
+import shlex
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import math
@@ -20,7 +20,17 @@ APP_CW = os.path.expanduser("~/workarea/uhd/work/cw_tx.py")
 APP_RX = "./rfnoc_rx_to_file_host"
 APP_CONVERT = "./convert_samples_to_csv.py"
 WORKDIR = os.path.expanduser("~/workarea/uhd/work/build")
-
+REMOTE_PULSE_DIR = "/home/work/fixed_power"
+REMOTE_PULSE_APP = "./rfnoc_radio_loopback"
+REMOTE_UHD_LIB_DIR = "/home/root/app/uhd_lib"
+REMOTE_PULSE_PID_FILE = "/tmp/rfnoc_gui_pulse.pid"
+REMOTE_CW_DIR = "/home/work/CW"
+REMOTE_CW_APP = "cw_tx.py"
+REMOTE_CW_PID_FILE = "/tmp/rfnoc_gui_cw.pid"
+REMOTE_RX_DIR = "/home/work/pulse_to_file"
+REMOTE_RX_APP = "./rfnoc_rx_to_file_custom"
+REMOTE_RX_FILE = f"{REMOTE_RX_DIR}/usrp_samples.dat"
+REMOTE_RX_PID_FILE = "/tmp/rfnoc_gui_rx.pid"
 proc = None
 
 tx_time = deque(maxlen=200)
@@ -139,6 +149,7 @@ def update_fields_for_mode(*args):
     pulse_frame.grid_remove()
     file_frame.grid_remove()
     fpga_frame.grid_remove()
+    download_rx_button.grid_remove()
 
     # Show the E312 connection panel only for the E312 target
     if selected_target == "USRP E312":
@@ -180,18 +191,28 @@ def update_fields_for_mode(*args):
             text="CW uses TX frequency, TX gain, TX BW and sample rate"
         )
 
+
     elif selected == "RX to File":
+
         rx_frame.grid()
+
         sampling_frame.grid()
+
         file_frame.grid()
 
         file_frame.config(text="RX Output File")
-        browse_output_button.config(text="Choose output file")
+
+        browse_output_button.config(text="Choose local output file")
 
         rate.set("1")
 
+        if execution_target.get() == "USRP E312":
+            download_rx_button.grid()
+
         rate_note.config(
+
             text="Recommended rate for RX to File: 1 MSPS"
+
         )
 
     elif selected == "Convert to CSV":
@@ -224,12 +245,7 @@ def start_app():
     selected_mode = mode.get()
     selected_target = execution_target.get()
 
-    if selected_target == "USRP E312":
-        messagebox.showinfo(
-            "USRP E312 target",
-            "Remote execution on the E312 will be added in the next step."
-        )
-        return
+
 
     try:
         rx_freq_hz = float(rx_freq.get()) * 1e6
@@ -254,35 +270,184 @@ def start_app():
     tx_dbfs_values.clear()
     start_time = None
 
-
     if selected_mode == "CW":
-        cmd = [
-            APP_CW,
+        process_cwd = WORKDIR
+        cw_args = [
             "--tx-freq", str(tx_freq_hz),
             "--tx-gain", tx_gain.get(),
             "--rate", str(rate_sps),
         ]
 
         if tx_bw_hz > 0:
-            cmd += ["--tx-bw", str(tx_bw_hz)]
+            cw_args += [
+                "--tx-bw",
+                str(tx_bw_hz),
+            ]
 
-        append_output("Starting CW app:\n" + " ".join(cmd) + "\n\n")
+        process_cwd = WORKDIR
+
+        if selected_target == "Host PC":
+            cmd = [
+                sys.executable,
+                APP_CW,
+                *cw_args,
+            ]
+
+            append_output(
+                "Starting CW app on Host PC:\n"
+                + " ".join(cmd)
+                + "\n\n"
+            )
+
+
+        else:
+
+            ip = e312_ip.get().strip()
+
+            user = e312_user.get().strip()
+
+            if not ip:
+                messagebox.showerror(
+
+                    "USRP not found",
+
+                    "Press Find USRP first."
+
+                )
+
+                return
+
+            if not user:
+                messagebox.showerror(
+
+                    "Missing username",
+
+                    "Enter the E312 SSH username."
+
+                )
+
+                return
+
+            target = f"{user}@{ip}"
+
+            remote_command = (
+                    f"cd {shlex.quote(REMOTE_CW_DIR)}"
+                    " && "
+                    f"echo $$ > {shlex.quote(REMOTE_CW_PID_FILE)}"
+                    " && "
+                    f"exec python3 {shlex.quote(REMOTE_CW_APP)} "
+                    + " ".join(
+                shlex.quote(str(arg))
+                for arg in cw_args
+            )
+            )
+
+            cmd = [
+
+                "ssh",
+
+                "-o", "ConnectTimeout=5",
+
+                target,
+
+                remote_command,
+
+            ]
+
+            process_cwd = WORKDIR
+
+            append_output(
+
+                f"Starting Pulse application on {target}:\n"
+
+                f"{remote_command}\n\n"
+
+            )
     elif selected_mode == "RX to File":
-
-        cmd = [
-            APP_RX,
+        rx_args = [
             "--freq", str(rx_freq_hz),
             "--gain", rx_gain.get(),
             "--rate", str(rate_sps),
             "--threshold", threshold.get(),
-            "--file", rx_output.get(),
         ]
 
         if rx_bw_hz > 0:
-            cmd += ["--bw", str(rx_bw_hz)]
+            rx_args += [
+                "--bw",
+                str(rx_bw_hz),
+            ]
 
         if spp.get().strip():
-            cmd += ["--spp", spp.get()]
+            rx_args += [
+                "--spp",
+                spp.get(),
+            ]
+
+        process_cwd = WORKDIR
+
+        if selected_target == "Host PC":
+            cmd = [
+                APP_RX,
+                *rx_args,
+                "--file", rx_output.get(),
+            ]
+
+            append_output(
+                "Starting RX-to-File on Host PC:\n"
+                + " ".join(cmd)
+                + "\n\n"
+            )
+
+        else:
+            ip = e312_ip.get().strip()
+            user = e312_user.get().strip()
+
+            if not ip:
+                messagebox.showerror(
+                    "USRP not found",
+                    "Press Find USRP first."
+                )
+                return
+
+            if not user:
+                messagebox.showerror(
+                    "Missing username",
+                    "Enter the E312 SSH username."
+                )
+                return
+
+            target = f"{user}@{ip}"
+
+            remote_args = [
+                *rx_args,
+                "--file", REMOTE_RX_FILE,
+            ]
+
+            remote_command = (
+                    f"cd {shlex.quote(REMOTE_RX_DIR)}"
+                    " && "
+                    f"echo $$ > {shlex.quote(REMOTE_RX_PID_FILE)}"
+                    " && "
+                    f"exec {REMOTE_RX_APP} "
+                    + " ".join(
+                shlex.quote(str(arg))
+                for arg in remote_args
+            )
+            )
+
+            cmd = [
+                "ssh",
+                "-o", "ConnectTimeout=5",
+                target,
+                remote_command,
+            ]
+
+            append_output(
+                f"Starting RX-to-File on {target}:\n"
+                f"{remote_command}\n\n"
+                f"Remote output file:\n{REMOTE_RX_FILE}\n\n"
+            )
+
 
         append_output(
             "Starting RX-to-File app:\n"
@@ -303,46 +468,183 @@ def start_app():
             + "\n\n"
         )
 
+
     else:
+
         try:
+
             threshold_dbfs = float(threshold.get())
-            thr = int(round(32767.0 * pow(10.0, threshold_dbfs / 20.0)))
+
+            thr = int(
+
+                round(
+
+                    32767.0
+
+                    * pow(10.0, threshold_dbfs / 20.0)
+
+                )
+
+            )
 
             delay_us = float(delay.get())
-            delay_counts = max(0, int(round((delay_us - 14.0) / 0.01)))
+
+            delay_counts = max(
+
+                0,
+
+                int(round((delay_us - 14.0) / 0.01))
+
+            )
 
             pw_us = float(pulsewidth.get())
-            pw_counts = max(1, int(round(pw_us * float(rate.get()))))
+
+            pw_counts = max(
+
+                1,
+
+                int(round(pw_us * float(rate.get())))
+
+            )
+
 
         except ValueError:
-            messagebox.showerror("Invalid input", "Check threshold, delay, and pulse width values.")
+
+            messagebox.showerror(
+
+                "Invalid input",
+
+                "Check threshold, delay, and pulse width values."
+
+            )
+
             return
 
-        cmd = [
-            APP_PULSE,
+        pulse_args = [
+
             "--rx-freq", str(rx_freq_hz),
+
             "--tx-freq", str(tx_freq_hz),
+
             "--rx-gain", rx_gain.get(),
+
             "--tx-gain", tx_gain.get(),
+
             "--threshold", str(thr),
+
             "--avg-delay", avg_delay.get(),
+
             "--delay", str(delay_counts),
+
             "--pw", str(pw_counts),
+
             "--spp", spp.get(),
+
             "--rate", str(rate_sps),
+
         ]
 
         if rx_bw_hz > 0:
-            cmd += ["--rx-bw", str(rx_bw_hz)]
+            pulse_args += [
+
+                "--rx-bw",
+
+                str(rx_bw_hz),
+
+            ]
 
         if tx_bw_hz > 0:
-            cmd += ["--tx-bw", str(tx_bw_hz)]
+            pulse_args += [
 
-        append_output("Starting RFNoC app:\n" + " ".join(cmd) + "\n\n")
+                "--tx-bw",
+
+                str(tx_bw_hz),
+
+            ]
+
+        if selected_target == "Host PC":
+
+            cmd = [
+
+                APP_PULSE,
+
+                *pulse_args,
+
+            ]
+
+            process_cwd = WORKDIR
+
+            append_output(
+
+                "Starting Pulse app on Host PC:\n"
+
+                + " ".join(cmd)
+
+                + "\n\n"
+
+            )
+
+
+        else:
+
+            ip = e312_ip.get().strip()
+
+            user = e312_user.get().strip()
+
+            if not ip:
+                messagebox.showerror(
+
+                    "USRP not found",
+
+                    "Press Find USRP first."
+
+                )
+
+                return
+
+            target = f"{user}@{ip}"
+
+            remote_command = (
+                    f"export LD_LIBRARY_PATH="
+                    f"{shlex.quote(REMOTE_UHD_LIB_DIR)}:"
+                    "$LD_LIBRARY_PATH"
+                    " && "
+                    f"cd {shlex.quote(REMOTE_PULSE_DIR)}"
+                    " && "
+                    f"echo $$ > {shlex.quote(REMOTE_PULSE_PID_FILE)}"
+                    " && "
+                    f"exec {REMOTE_PULSE_APP} "
+                    + " ".join(
+                shlex.quote(str(arg))
+                for arg in pulse_args
+            )
+            )
+
+            cmd = [
+
+                "ssh",
+
+                "-o", "ConnectTimeout=5",
+
+                target,
+
+                remote_command,
+
+            ]
+
+            process_cwd = WORKDIR
+
+            append_output(
+
+                f"Starting Pulse app on {target}:\n"
+
+                f"{remote_command}\n\n"
+
+            )
 
     proc = subprocess.Popen(
         cmd,
-        cwd=WORKDIR,
+        cwd=process_cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -378,27 +680,291 @@ def start_app():
     threading.Thread(target=monitor, daemon=True).start()
 def clear_output():
     output.delete("1.0", tk.END)
+
+def find_usrp():
+    append_output("Searching for USRP devices...\n")
+
+    try:
+        result = subprocess.run(
+            ["uhd_find_devices"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    except FileNotFoundError:
+        e312_status.set("● UHD not found")
+        status_label.configure(foreground="red")
+
+        append_output(
+            "Error: uhd_find_devices was not found.\n\n"
+        )
+        return
+
+    except subprocess.TimeoutExpired:
+        e312_status.set("● Search timeout")
+        status_label.configure(foreground="red")
+
+        append_output(
+            "USRP discovery timed out.\n\n"
+        )
+        return
+
+    output_text = result.stdout + result.stderr
+    append_output(output_text + "\n")
+
+    ip_matches = re.findall(
+        r"\baddr:\s*(\d{1,3}(?:\.\d{1,3}){3})",
+        output_text,
+    )
+
+    if not ip_matches:
+        e312_ip.set("")
+        e312_status.set("● No USRP found")
+        status_label.configure(foreground="red")
+
+        append_output(
+            "No USRP IP address was found.\n\n"
+        )
+        return
+
+    detected_ip = ip_matches[0]
+
+    e312_ip.set(detected_ip)
+    e312_status.set("● USRP found")
+    status_label.configure(foreground="orange")
+
+    append_output(
+        f"USRP found at {detected_ip}\n"
+        "Press Test Connection to verify SSH access.\n\n"
+    )
+
 def test_connection():
-    target = f"{e312_user.get().strip()}@{e312_ip.get().strip()}"
+    ip = e312_ip.get().strip()
+    user = e312_user.get().strip()
 
-    append_output(f"Testing connection to {target}...\n")
+    if not ip:
+        e312_status.set("● Find USRP first")
+        status_label.configure(foreground="red")
+        append_output("No E312 IP address is selected.\n\n")
+        return
 
-    # Temporary behavior; real SSH test will be added next
-    e312_status.set("Connected")
-    status_label.configure(foreground="green")
+    target = f"{user}@{ip}"
 
-    append_output(f"Connected to {target}\n\n")
+    append_output(f"Testing SSH connection to {target}...\n")
+
+    try:
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o", "ConnectTimeout=5",
+                "-o", "BatchMode=yes",
+                target,
+                "echo E312_CONNECTED",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    except FileNotFoundError:
+        e312_status.set("● SSH not found")
+        status_label.configure(foreground="red")
+        append_output("The ssh command was not found.\n\n")
+        return
+
+    except subprocess.TimeoutExpired:
+        e312_status.set("● Connection timeout")
+        status_label.configure(foreground="red")
+        append_output("SSH connection timed out.\n\n")
+        return
+
+    if (
+        result.returncode == 0
+        and "E312_CONNECTED" in result.stdout
+    ):
+        e312_status.set("● Connected")
+        status_label.configure(foreground="green")
+        append_output(f"Connected successfully to {target}.\n\n")
+
+    else:
+        e312_status.set("● Connection failed")
+        status_label.configure(foreground="red")
+
+        error_text = result.stderr.strip()
+
+        if not error_text:
+            error_text = "Unknown SSH error."
+
+        append_output(
+            f"Could not connect to {target}:\n"
+            f"{error_text}\n\n"
+        )
 def stop_app():
     global proc
 
+    selected_target = execution_target.get()
+    selected_mode = mode.get()
+
+    # Stop the application on the E312 first
+    if selected_target == "USRP E312":
+        ip = e312_ip.get().strip()
+        user = e312_user.get().strip()
+
+        if not ip or not user:
+            append_output(
+                "\nCannot stop remote application: "
+                "missing E312 connection information.\n"
+            )
+            return
+
+        target = f"{user}@{ip}"
+
+        if selected_mode == "CW":
+            remote_pid_file = REMOTE_CW_PID_FILE
+            app_name = "CW"
+
+        elif selected_mode == "RX to File":
+            remote_pid_file = REMOTE_RX_PID_FILE
+            app_name = "RX-to-File"
+
+        elif selected_mode == "Pulse":
+            remote_pid_file = REMOTE_PULSE_PID_FILE
+            app_name = "Pulse"
+
+        else:
+            remote_pid_file = None
+            app_name = selected_mode
+
+        if remote_pid_file:
+            remote_stop_command = (
+                f"pid=$(cat {shlex.quote(remote_pid_file)} "
+                "2>/dev/null); "
+                'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then '
+                'kill -INT "$pid"; '
+                "fi; "
+                f"rm -f {shlex.quote(remote_pid_file)}"
+            )
+
+            append_output(
+                f"\nStopping {app_name} on {target}...\n"
+            )
+
+            try:
+                result = subprocess.run(
+                    [
+                        "ssh",
+                        "-o", "ConnectTimeout=5",
+                        "-o", "BatchMode=yes",
+                        target,
+                        remote_stop_command,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+
+                if result.stdout:
+                    append_output(result.stdout)
+
+                if result.stderr:
+                    append_output(result.stderr)
+
+            except subprocess.TimeoutExpired:
+                append_output(
+                    "Remote stop command timed out.\n"
+                )
+
+    # Wait for the main SSH/local process to finish
     if proc is not None:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-            append_output("\nStopping RFNoC app...\n")
-        except ProcessLookupError:
-            pass
+            proc.wait(timeout=3)
+
+        except subprocess.TimeoutExpired:
+            # Fallback: stop the local process group
+            try:
+                os.killpg(
+                    os.getpgid(proc.pid),
+                    signal.SIGINT,
+                )
+            except ProcessLookupError:
+                pass
+
         proc = None
 
+def download_rx_recording():
+    ip = e312_ip.get().strip()
+    user = e312_user.get().strip()
+    local_file = rx_output.get().strip()
+
+    if not ip:
+        messagebox.showerror(
+            "USRP not found",
+            "Press Find USRP first."
+        )
+        return
+
+    if not local_file:
+        messagebox.showerror(
+            "Missing destination",
+            "Choose a local output file."
+        )
+        return
+
+    target = f"{user}@{ip}"
+
+    local_directory = os.path.dirname(local_file)
+
+    if local_directory:
+        os.makedirs(local_directory, exist_ok=True)
+
+    cmd = [
+        "scp",
+        "-o", "ConnectTimeout=5",
+        f"{target}:{REMOTE_RX_FILE}",
+        local_file,
+    ]
+
+    append_output(
+        "Downloading recording from E312:\n"
+        + " ".join(cmd)
+        + "\n\n"
+    )
+
+    def download_worker():
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            if result.stdout:
+                append_output(result.stdout)
+
+            if result.stderr:
+                append_output(result.stderr)
+
+            if result.returncode == 0:
+                append_output(
+                    f"Recording downloaded successfully:\n"
+                    f"{local_file}\n\n"
+                )
+            else:
+                append_output(
+                    "Recording download failed.\n\n"
+                )
+
+        except subprocess.TimeoutExpired:
+            append_output(
+                "Recording download timed out.\n\n"
+            )
+
+    threading.Thread(
+        target=download_worker,
+        daemon=True,
+    ).start()
 
 def browse_bitfile():
     path = filedialog.askopenfilename(
@@ -572,7 +1138,7 @@ e312_frame.grid(
     pady=4,
 )
 
-e312_ip = tk.StringVar(value="192.168.10.2")
+e312_ip = tk.StringVar(value="")
 e312_user = tk.StringVar(value="root")
 e312_status = tk.StringVar(value="Disconnected")
 ttk.Label(
@@ -631,15 +1197,31 @@ status_label.grid(
     column=1,
     sticky="w",
 )
-ttk.Button(
-    e312_frame,
-    text="Test Connection",
-    command=test_connection,
-).grid(
+e312_button_frame = ttk.Frame(e312_frame)
+
+e312_button_frame.grid(
     row=3,
     column=0,
     columnspan=2,
     pady=5,
+)
+
+ttk.Button(
+    e312_button_frame,
+    text="Find USRP",
+    command=find_usrp,
+).pack(
+    side=tk.LEFT,
+    padx=5,
+)
+
+ttk.Button(
+    e312_button_frame,
+    text="Test Connection",
+    command=test_connection,
+).pack(
+    side=tk.LEFT,
+    padx=5,
 )
 # =========================================================
 # RX parameters
@@ -803,7 +1385,18 @@ browse_output_button.grid(
     columnspan=2,
     pady=5,
 )
+download_rx_button = ttk.Button(
+    file_frame,
+    text="Download from E312",
+    command=download_rx_recording,
+)
 
+download_rx_button.grid(
+    row=2,
+    column=0,
+    columnspan=2,
+    pady=5,
+)
 
 # =========================================================
 # FPGA configuration

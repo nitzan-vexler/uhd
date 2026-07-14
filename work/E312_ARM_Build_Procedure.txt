@@ -1,0 +1,98 @@
+E312 ARM Build Procedure
+
+1. Source the E310 SDK
+
+    source ~/e310_sdk_4p8/environment-setup-cortexa9t2hf-neon-oe-linux-gnueabi
+
+------------------------------------------------------------------------
+
+2. Build the custom ARM UHD (only after UHD changes)
+
+Rebuild this only if you modified UHD itself (host/include, host/lib,
+RFNoC block control, etc.).
+
+    cd ~/workarea/uhd
+
+    rm -rf build-arm
+    mkdir build-arm
+    cd build-arm
+
+    cmake ../host \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=$HOME/uhd_e312_custom \
+        -DENABLE_TESTS=OFF \
+        -DENABLE_EXAMPLES=OFF \
+        -DENABLE_UTILS=ON \
+        -DENABLE_PYTHON_API=OFF
+
+    make -j$(nproc)
+    make install
+
+------------------------------------------------------------------------
+
+3. Build the ARM application
+
+    cd ~/workarea/uhd/work
+
+    rm -rf build-e312
+    mkdir build-e312
+    cd build-e312
+
+    cmake .. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DUHD_DIR=$HOME/uhd_e312_custom/lib/cmake/uhd \
+      -DUHD_INCLUDE_DIRS=$HOME/uhd_e312_custom/include \
+      -DUHD_LIBRARIES=$HOME/uhd_e312_custom/lib/libuhd.so \
+      -DCMAKE_FIND_ROOT_PATH="$HOME/uhd_e312_custom;$SDKTARGETSYSROOT" \
+      -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+      -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+      -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH
+
+    make -j$(nproc) rfnoc_radio_loopback
+
+------------------------------------------------------------------------
+
+4. Verify the executable
+
+    file rfnoc_radio_loopback
+
+Expected:
+
+    ELF 32-bit LSB executable, ARM
+
+------------------------------------------------------------------------
+
+5. Copy the application to the E312
+
+    scp rfnoc_radio_loopback \
+    root@192.168.7.8:/home/work/fixed_power/
+
+------------------------------------------------------------------------
+
+6. Copy the custom UHD libraries (only if UHD changed)
+
+    scp ~/uhd_e312_custom/lib/libuhd.so* \
+    root@192.168.7.8:/home/root/app/uhd_lib/
+
+If you only changed rfnoc_radio_loopback.cpp, this step is NOT required.
+
+------------------------------------------------------------------------
+
+7. Test on the E312
+
+    ssh root@192.168.7.8
+
+    export LD_LIBRARY_PATH=/home/root/app/uhd_lib:$LD_LIBRARY_PATH
+
+    cd /home/work/fixed_power
+
+    ./rfnoc_radio_loopback --help
+
+or run with your desired parameters.
+
+Notes
+
+-   Rebuild UHD only after changing UHD source code.
+-   Rebuild the application after changing rfnoc_radio_loopback.cpp.
+-   Always use the custom libuhd.so on the E312 by setting
+    LD_LIBRARY_PATH.
