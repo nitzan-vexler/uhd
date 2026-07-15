@@ -16,7 +16,7 @@ import math
 import sys
 
 APP_PULSE = "./rfnoc_radio_loopback"
-APP_CW = os.path.expanduser("~/workarea/uhd/work/cw_tx.py")
+APP_CW = os.path.expanduser("~/workarea/uhd/work/cw.py")
 APP_RX = "./rfnoc_rx_to_file_host"
 APP_CONVERT = "./convert_samples_to_csv.py"
 WORKDIR = os.path.expanduser("~/workarea/uhd/work/build")
@@ -25,7 +25,7 @@ REMOTE_PULSE_APP = "./rfnoc_radio_loopback"
 REMOTE_UHD_LIB_DIR = "/home/root/app/uhd_lib"
 REMOTE_PULSE_PID_FILE = "/tmp/rfnoc_gui_pulse.pid"
 REMOTE_CW_DIR = "/home/work/CW"
-REMOTE_CW_APP = "cw_tx.py"
+REMOTE_CW_APP = "cw.py"
 REMOTE_CW_PID_FILE = "/tmp/rfnoc_gui_cw.pid"
 REMOTE_RX_DIR = "/home/work/pulse_to_file"
 REMOTE_RX_APP = "./rfnoc_rx_to_file_custom"
@@ -183,12 +183,14 @@ def update_fields_for_mode(*args):
     elif selected == "CW":
         tx_frame.grid()
         sampling_frame.grid()
+        rate.set("1")
+
 
         # CW uses rate but does not use SPP
         set_field_state(spp, "disabled")
 
         rate_note.config(
-            text="CW uses TX frequency, TX gain, TX BW and sample rate"
+            text="Recommanded rate is 1 MSPS"
         )
 
 
@@ -238,6 +240,7 @@ def start_app():
     global proc
     global threshold_dbfs
     global start_time
+    process_cwd = WORKDIR
 
     if proc is not None:
         messagebox.showinfo("Already running", "App is already running.")
@@ -331,6 +334,10 @@ def start_app():
             target = f"{user}@{ip}"
 
             remote_command = (
+                    f"export LD_LIBRARY_PATH="
+                    f"{shlex.quote(REMOTE_UHD_LIB_DIR)}:"
+                    "$LD_LIBRARY_PATH"
+                    " && "
                     f"cd {shlex.quote(REMOTE_CW_DIR)}"
                     " && "
                     f"echo $$ > {shlex.quote(REMOTE_CW_PID_FILE)}"
@@ -358,7 +365,7 @@ def start_app():
 
             append_output(
 
-                f"Starting Pulse application on {target}:\n"
+                f"Starting cw application on {target}:\n"
 
                 f"{remote_command}\n\n"
 
@@ -455,8 +462,11 @@ def start_app():
             + "\n\n"
         )
     elif selected_mode == "Convert to CSV":
+
+        process_cwd = WORKDIR
+
         cmd = [
-            "python3",
+            sys.executable,
             APP_CONVERT,
             "--input",
             rx_output.get(),
@@ -1020,11 +1030,12 @@ def update_fpga():
 
 root = tk.Tk()
 root.title("SDR GUI")
-
+style = ttk.Style()
+style.configure(".", font=("TkDefaultFont", 12))
 # Left side: controls
 # Right side: plot and terminal
-root.columnconfigure(0, weight=3, minsize=800)
-root.columnconfigure(1, weight=2, minsize=600)
+root.columnconfigure(0, weight=1, minsize=450)
+root.columnconfigure(1, weight=2, minsize=750)
 root.rowconfigure(0, weight=1)
 
 frame = ttk.Frame(root, padding=10)
@@ -1424,7 +1435,7 @@ bitfile = add_field(
 
 ttk.Label(
     fpga_frame,
-    text="Select the bitfile according to Relative or Fixed Power mode",
+    text="Select Fixed/Relative Power bitfile",
     foreground="#0066CC",
 ).grid(
     row=1,
