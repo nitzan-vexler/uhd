@@ -150,6 +150,8 @@ def update_fields_for_mode(*args):
     file_frame.grid_remove()
     fpga_frame.grid_remove()
     download_rx_button.grid_remove()
+    antenna_frame.grid_remove()
+
 
     # Show the E312 connection panel only for the E312 target
     if selected_target == "USRP E312":
@@ -170,37 +172,62 @@ def update_fields_for_mode(*args):
     set_field_state(spp, "normal")
 
     if selected == "Pulse":
+        antenna_frame.grid()
         rx_frame.grid()
         tx_frame.grid()
         sampling_frame.grid()
         pulse_frame.grid()
         fpga_frame.grid()
 
+        rx_port_combo.configure(state="readonly")
+        tx_port_combo.configure(state="readonly")
+
         rate_note.config(
             text="Recommended rate for Pulse mode: 60 MSPS"
         )
 
+
     elif selected == "CW":
+
+        antenna_frame.grid()
+
         tx_frame.grid()
+
         sampling_frame.grid()
+
+        # CW only uses the TX antenna.
+
+        rx_port_combo.configure(state="disabled")
+
+        tx_port_combo.configure(state="readonly")
+
         rate.set("1")
 
-
-        # CW uses rate but does not use SPP
         set_field_state(spp, "disabled")
 
         rate_note.config(
-            text="Recommanded rate is 1 MSPS"
+
+            text="Recommended rate is 1 MSPS"
+
         )
 
 
+
     elif selected == "RX to File":
+
+        antenna_frame.grid()
 
         rx_frame.grid()
 
         sampling_frame.grid()
 
         file_frame.grid()
+
+        # RX-to-file only uses the RX antenna.
+
+        rx_port_combo.configure(state="readonly")
+
+        tx_port_combo.configure(state="disabled")
 
         file_frame.config(text="RX Output File")
 
@@ -236,6 +263,27 @@ def read_process_output(p, finished_msg):
     rc = p.wait()
     append_output(f"\n{finished_msg} Return code: {rc}\n\n")
 
+def get_antenna_settings():
+    rx_port = rx_port_combo.get()
+    tx_port = tx_port_combo.get()
+
+    rx_map = {
+        "TRX-A": ("0", "TX/RX"),
+        "RX2-A": ("0", "RX2"),
+        "TRX-B": ("1", "TX/RX"),
+        "RX2-B": ("1", "RX2"),
+    }
+
+    tx_map = {
+        "TRX-A": ("0", "TX/RX"),
+        "TRX-B": ("1", "TX/RX"),
+    }
+
+    rx_chan, rx_ant_name = rx_map[rx_port]
+    tx_chan, tx_ant_name = tx_map[tx_port]
+
+    return rx_chan, rx_ant_name, tx_chan, tx_ant_name
+
 def start_app():
     global proc
     global threshold_dbfs
@@ -247,6 +295,7 @@ def start_app():
         return
     selected_mode = mode.get()
     selected_target = execution_target.get()
+    rx_chan, rx_ant_name, tx_chan, tx_ant_name = get_antenna_settings()
 
 
 
@@ -278,6 +327,8 @@ def start_app():
         cw_args = [
             "--tx-freq", str(tx_freq_hz),
             "--tx-gain", tx_gain.get(),
+            "--tx-ant", tx_ant_name,
+            "--tx-chan", tx_chan,
             "--rate", str(rate_sps),
         ]
 
@@ -371,12 +422,33 @@ def start_app():
 
             )
     elif selected_mode == "RX to File":
+        try:
+            threshold_dbfs = float(threshold.get())
+
+            thr = int(
+                  round(
+                    32767.0
+                      * pow(10.0, threshold_dbfs / 20.0)
+                   )
+            )
+
+            thr = max(0, min(32767, thr))
+
+        except ValueError:
+            messagebox.showerror(
+                "Invalid input",
+                  "Threshold must be a valid dBFS value."
+            )
+            return
+
         rx_args = [
-            "--freq", str(rx_freq_hz),
-            "--gain", rx_gain.get(),
-            "--rate", str(rate_sps),
-            "--threshold", threshold.get(),
-        ]
+                "--freq", str(rx_freq_hz),
+                "--gain", rx_gain.get(),
+                "--ant", rx_ant_name,
+                "--radio-chan", rx_chan,
+                "--rate", str(rate_sps),
+                "--threshold", str(threshold.get()),
+            ]
 
         if rx_bw_hz > 0:
             rx_args += [
@@ -531,27 +603,23 @@ def start_app():
             return
 
         pulse_args = [
-
             "--rx-freq", str(rx_freq_hz),
-
             "--tx-freq", str(tx_freq_hz),
 
             "--rx-gain", rx_gain.get(),
-
             "--tx-gain", tx_gain.get(),
 
+            "--rx-ant", rx_ant_name,
+            "--tx-ant", tx_ant_name,
+            "--rx-chan", rx_chan,
+            "--tx-chan", tx_chan,
+
             "--threshold", str(thr),
-
             "--avg-delay", avg_delay.get(),
-
             "--delay", str(delay_counts),
-
             "--pw", str(pw_counts),
-
             "--spp", spp.get(),
-
             "--rate", str(rate_sps),
-
         ]
 
         if rx_bw_hz > 0:
@@ -1031,21 +1099,106 @@ def update_fpga():
 root = tk.Tk()
 root.title("SDR GUI")
 style = ttk.Style()
-style.configure(".", font=("TkDefaultFont", 12))
+style.configure(".", font=("TkDefaultFont", 10))
 # Left side: controls
 # Right side: plot and terminal
 root.columnconfigure(0, weight=1, minsize=450)
 root.columnconfigure(1, weight=2, minsize=750)
 root.rowconfigure(0, weight=1)
 
-frame = ttk.Frame(root, padding=10)
-frame.grid(
+# Scrollable left panel
+left_container = ttk.Frame(root)
+left_container.grid(
     row=0,
     column=0,
     sticky="nsew",
 )
 
+left_container.rowconfigure(0, weight=1)
+left_container.columnconfigure(0, weight=1)
+
+left_canvas = tk.Canvas(
+    left_container,
+    highlightthickness=0,
+)
+
+left_scrollbar = ttk.Scrollbar(
+    left_container,
+    orient="vertical",
+    command=left_canvas.yview,
+)
+
+left_canvas.configure(
+    yscrollcommand=left_scrollbar.set
+)
+
+left_canvas.grid(
+    row=0,
+    column=0,
+    sticky="nsew",
+)
+
+left_scrollbar.grid(
+    row=0,
+    column=1,
+    sticky="ns",
+)
+
+frame = ttk.Frame(
+    left_canvas,
+    padding=10,
+)
+
+left_window = left_canvas.create_window(
+    (0, 0),
+    window=frame,
+    anchor="nw",
+)
+
 frame.columnconfigure(0, weight=1)
+
+def update_left_scroll_region(event=None):
+    left_canvas.configure(
+        scrollregion=left_canvas.bbox("all")
+    )
+
+
+def resize_left_frame(event):
+    left_canvas.itemconfigure(
+        left_window,
+        width=event.width
+    )
+frame.bind(
+    "<Configure>",
+    update_left_scroll_region,
+)
+
+left_canvas.bind(
+    "<Configure>",
+    resize_left_frame,
+)
+
+def scroll_left_panel(event):
+    left_canvas.yview_scroll(
+        int(-1 * (event.delta / 120)),
+        "units",
+    )
+
+
+left_canvas.bind_all(
+    "<MouseWheel>",
+    scroll_left_panel,
+)
+
+left_canvas.bind_all(
+    "<Button-4>",
+    lambda event: left_canvas.yview_scroll(-1, "units"),
+)
+
+left_canvas.bind_all(
+    "<Button-5>",
+    lambda event: left_canvas.yview_scroll(1, "units"),
+)
 
 right_frame = ttk.Frame(root, padding=(0, 10, 10, 10))
 right_frame.grid(
@@ -1234,6 +1387,92 @@ ttk.Button(
     side=tk.LEFT,
     padx=5,
 )
+
+# =========================================================
+# Antenna selection
+# =========================================================
+antenna_frame = ttk.LabelFrame(
+    frame,
+    text="Antenna Selection",
+    padding=8,
+)
+
+antenna_frame.grid(
+    row=2,
+    column=0,
+    sticky="ew",
+    pady=4,
+)
+
+antenna_frame.columnconfigure(1, weight=1)
+
+rx_channel = tk.StringVar(value="0")
+tx_channel = tk.StringVar(value="0")
+
+rx_ant = tk.StringVar(value="RX2")
+tx_ant = tk.StringVar(value="TX/RX")
+
+ttk.Label(
+    antenna_frame,
+    text="RX port",
+).grid(
+    row=0,
+    column=0,
+    sticky="w",
+    padx=4,
+    pady=3,
+)
+
+rx_port_combo = ttk.Combobox(
+    antenna_frame,
+    values=[
+        "TRX-A",
+        "RX2-A",
+        "TRX-B",
+        "RX2-B",
+    ],
+    state="readonly",
+)
+
+rx_port_combo.set("RX2-A")
+
+rx_port_combo.grid(
+    row=0,
+    column=1,
+    sticky="ew",
+    padx=4,
+    pady=3,
+)
+
+ttk.Label(
+    antenna_frame,
+    text="TX port",
+).grid(
+    row=1,
+    column=0,
+    sticky="w",
+    padx=4,
+    pady=3,
+)
+
+tx_port_combo = ttk.Combobox(
+    antenna_frame,
+    values=[
+        "TRX-A",
+        "TRX-B",
+    ],
+    state="readonly",
+)
+
+tx_port_combo.set("TRX-A")
+
+tx_port_combo.grid(
+    row=1,
+    column=1,
+    sticky="ew",
+    padx=4,
+    pady=3,
+)
 # =========================================================
 # RX parameters
 # =========================================================
@@ -1243,7 +1482,7 @@ rx_frame = ttk.LabelFrame(
     padding=8
 )
 rx_frame.grid(
-    row=2,
+    row=3,
     column=0,
     sticky="ew",
     pady=4
@@ -1254,7 +1493,7 @@ rx_frame.columnconfigure(1, weight=1)
 rx_freq = add_field(rx_frame, 0, "RX freq [MHz]", "200")
 rx_gain = add_field(rx_frame, 1, "RX gain [dB]", "10")
 rx_bw = add_field(rx_frame, 2, "RX BW [MHz]", "1")
-
+threshold = add_field(rx_frame, 3, "Threshold [dBFS]", "-30")
 
 # =========================================================
 # TX parameters
@@ -1265,7 +1504,7 @@ tx_frame = ttk.LabelFrame(
     padding=8
 )
 tx_frame.grid(
-    row=3,
+    row=4,
     column=0,
     sticky="ew",
     pady=4
@@ -1287,7 +1526,7 @@ sampling_frame = ttk.LabelFrame(
     padding=8
 )
 sampling_frame.grid(
-    row=4,
+    row=5,
     column=0,
     sticky="ew",
     pady=4
@@ -1322,7 +1561,7 @@ pulse_frame = ttk.LabelFrame(
     padding=8
 )
 pulse_frame.grid(
-    row=5,
+    row=6,
     column=0,
     sticky="ew",
     pady=4
@@ -1330,30 +1569,24 @@ pulse_frame.grid(
 
 pulse_frame.columnconfigure(1, weight=1)
 
-threshold = add_field(
-    pulse_frame,
-    0,
-    "Threshold [dBFS]",
-    "-30"
-)
 
 avg_delay = add_field(
     pulse_frame,
-    1,
+    0,
     "Avg start delay [samples]",
     "32"
 )
 
 delay = add_field(
     pulse_frame,
-    2,
+    1,
     "Delay [us]",
     "100"
 )
 
 pulsewidth = add_field(
     pulse_frame,
-    3,
+    2,
     "Pulse width [us]",
     "10"
 )
@@ -1368,7 +1601,7 @@ file_frame = ttk.LabelFrame(
     padding=8
 )
 file_frame.grid(
-    row=6,
+    row=7,
     column=0,
     sticky="ew",
     pady=4
@@ -1418,7 +1651,7 @@ fpga_frame = ttk.LabelFrame(
     padding=8
 )
 fpga_frame.grid(
-    row=7,
+    row=8,
     column=0,
     sticky="ew",
     pady=4
@@ -1478,7 +1711,7 @@ ttk.Button(
 # =========================================================
 button_frame = ttk.Frame(frame)
 button_frame.grid(
-    row=8,
+    row=9,
     column=0,
     sticky="ew",
     pady=10,

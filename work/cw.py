@@ -21,7 +21,7 @@ import time
 
 class cw(gr.top_block):
 
-    def __init__(self, tx_freq, tx_gain, samp_rate, tx_bw):
+    def __init__(self, tx_freq, tx_gain, tx_ant,tx_chan, samp_rate, tx_bw):
         gr.top_block.__init__(self, "cw")
 
         ##################################################
@@ -31,6 +31,7 @@ class cw(gr.top_block):
         self.tx_gain = tx_gain
         self.samp_rate = samp_rate
         self.tx_bw = tx_bw
+        self.tx_ant = tx_ant
 
         ##################################################
         # Blocks
@@ -40,17 +41,22 @@ class cw(gr.top_block):
             uhd.stream_args(
                 cpu_format="fc32",
                 args="",
-                channels=[0],
+                channels=[tx_chan],
             ),
             "",
         )
 
-        self.uhd_usrp_sink_0.set_center_freq(self.tx_freq, 0)
-        self.uhd_usrp_sink_0.set_gain(self.tx_gain, 0)
-        self.uhd_usrp_sink_0.set_antenna("TX/RX", 0)
+        sink_chan = 0
+
+        self.uhd_usrp_sink_0.set_center_freq(self.tx_freq, sink_chan)
+        self.uhd_usrp_sink_0.set_gain(self.tx_gain, sink_chan)
+        self.uhd_usrp_sink_0.set_antenna(self.tx_ant, sink_chan)
+
+        actual_tx_ant = self.uhd_usrp_sink_0.get_antenna(sink_chan)
+        print(f"Actual TX antenna: {actual_tx_ant}", flush=True)
 
         if self.tx_bw > 0:
-            self.uhd_usrp_sink_0.set_bandwidth(self.tx_bw, 0)
+            self.uhd_usrp_sink_0.set_bandwidth(self.tx_bw, sink_chan)
 
         self.uhd_usrp_sink_0.set_samp_rate(self.samp_rate)
 
@@ -120,7 +126,18 @@ def main():
         default=70,
         help="TX gain in dB",
     )
+    
+    parser.add_argument(
+    "--tx-ant",
+    type=str,
+    default="TX/RX",
+    )
 
+    parser.add_argument(
+    "--tx-chan",
+    type=int,
+    default=0,
+    )
     parser.add_argument(
         "--rate",
         type=float,
@@ -140,6 +157,8 @@ def main():
     tb = cw(
         tx_freq=args.tx_freq,
         tx_gain=args.tx_gain,
+        tx_ant=args.tx_ant,
+        tx_chan=args.tx_chan,
         samp_rate=args.rate,
         tx_bw=args.tx_bw,
     )
