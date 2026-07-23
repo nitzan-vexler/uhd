@@ -25,12 +25,190 @@
 #include <uhd/rfnoc/siggen_block_control.hpp>
 #include <cmath>
 #include <iomanip>
-
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <mutex>
+#include <regex>
+#include <string>
+#include <tuple>
 
 
 namespace po = boost::program_options;
 using uhd::rfnoc::radio_control;
 using namespace std::chrono_literals;
+
+using gps_data_t =
+    std::tuple<std::string, std::string, std::string, std::string>;
+
+std::mutex gps_mutex;
+
+gps_data_t latest_gps_data{
+    "No GPS Time",
+    "No Latitude",
+    "No Longitude",
+    "No Altitude"
+};
+
+std::atomic<bool> keep_gps_running{false};
+
+
+gps_data_t extract_gps_data(const std::string& gps_data)
+{
+    std::string gps_time  = "No GPS Time";
+    std::string latitude  = "No Latitude";
+    std::string longitude = "No Longitude";
+    std::string altitude  = "No Altitude";
+
+    if (gps_data.find("\"class\":\"TPV\"") == std::string::npos) {
+        return {gps_time, latitude, longitude, altitude};
+    }
+
+    std::smatch match;
+
+    // Save complete GPS UTC timestamp
+const std::regex time_regex(
+    "\"time\"\\s*:\\s*\"([^\"]+)\""
+);
+
+const std::regex lat_regex(
+    "\"lat\"\\s*:\\s*([-+]?\\d+(?:\\.\\d+)?)"
+);
+
+const std::regex lon_regex(
+    "\"lon\"\\s*:\\s*([-+]?\\d+(?:\\.\\d+)?)"
+);
+
+const std::regex alt_regex(
+    "\"alt(?:HAE|MSL)?\"\\s*:\\s*([-+]?\\d+(?:\\.\\d+)?)"
+);
+
+    if (std::regex_search(gps_data, match, time_regex)) {
+        gps_time = match[1].str();
+    }
+
+    if (std::regex_search(gps_data, match, lat_regex)) {
+        latitude = match[1].str();
+    }
+
+    if (std::regex_search(gps_data, match, lon_regex)) {
+        longitude = match[1].str();
+    }
+
+    if (std::regex_search(gps_data, match, alt_regex)) {
+        altitude = match[1].str();
+    }
+
+    return {gps_time, latitude, longitude, altitude};
+}
+
+
+void gps_stream_thread()
+{
+    std::cout << "[GPS] Starting gpspipe..." << std::endl;
+
+    // This application runs directly on the E312
+    FILE* pipe = popen("gpspipe -w", "r");
+
+    if (pipe == nullptr) {
+        std::cerr << "[GPS] Failed to start gpspipe" << std::endl;
+        return;
+    }
+
+    char buffer[2048];
+
+    while (
+        keep_gps_running.load()
+        && fgets(buffer, sizeof(buffer), pipe) != nullptr
+    ) {
+        const std::string message(buffer);
+
+        if (message.find("\"class\":\"TPV\"") == std::string::npos) {
+            continue;
+        }
+
+        const gps_data_t parsed = extract_gps_data(message);
+
+        if (std::get<0>(parsed) != "No GPS Time") {
+            std::lock_guard<std::mutex> lock(gps_mutex);
+            latest_gps_data = parsed;
+        }
+    }
+
+    pclose(pipe);
+
+    std::cout << "[GPS] GPS thread stopped" << std::endl;
+}
+
+
+gps_data_t get_latest_gps_data()
+{
+    std::lock_guard<std::mutex> lock(gps_mutex);
+    return latest_gps_data;
+}
+
+constexpr size_t GPS_TIME_SIZE = 32;
+
+/*
+ * Binary record layout:
+ *
+ * uint64_t system_time_us     8 bytes
+ * char gps_time[32]          32 bytes
+ * double latitude             8 bytes
+ * double longitude            8 bytes
+ * double altitude             8 bytes
+ * float rx_dbfs               4 bytes
+ *
+ * Total: 68 bytes per measurement
+ */
+void write_binary_measurement(
+    std::ofstream& outfile,
+    uint64_t system_time_us,
+    const std::string& gps_time,
+    double latitude,
+    double longitude,
+    double altitude,
+    float rx_dbfs)
+{
+    char gps_time_buffer[GPS_TIME_SIZE] = {};
+
+    std::strncpy(
+        gps_time_buffer,
+        gps_time.c_str(),
+        GPS_TIME_SIZE - 1
+    );
+
+    outfile.write(
+        reinterpret_cast<const char*>(&system_time_us),
+        sizeof(system_time_us)
+    );
+
+    outfile.write(
+        gps_time_buffer,
+        sizeof(gps_time_buffer)
+    );
+
+    outfile.write(
+        reinterpret_cast<const char*>(&latitude),
+        sizeof(latitude)
+    );
+
+    outfile.write(
+        reinterpret_cast<const char*>(&longitude),
+        sizeof(longitude)
+    );
+
+    outfile.write(
+        reinterpret_cast<const char*>(&altitude),
+        sizeof(altitude)
+    );
+
+    outfile.write(
+        reinterpret_cast<const char*>(&rx_dbfs),
+        sizeof(rx_dbfs)
+    );
+}
 
 /****************************************************************************
  * SIGINT handling
@@ -47,10 +225,10 @@ void sig_int_handler(int)
 int UHD_SAFE_MAIN(int argc, char* argv[])
 {
     // variables to be set by po
-    std::string args, rx_ant, tx_ant, rx_blockid, tx_blockid, ref, pps;
-    size_t total_num_samps, spp, rx_chan, tx_chan, threshold, pulsewidth, delay, avg_delay;
+    std::string args, rx_ant, tx_ant, rx_blockid, tx_blockid, ref, pps, output_file;
+    size_t total_num_samps, spp, rx_chan, tx_chan, threshold, pulsewidth, delay, avg_delay, pulse_gap;
     double rate, rx_freq, tx_freq, rx_gain, tx_gain, rx_bw, tx_bw, total_time, setup_time;
-    bool rx_timestamps;
+    bool rx_timestamps, save_data, enable_gps ;
 
     // setup the program options
     po::options_description desc("Allowed options");
@@ -62,6 +240,10 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("threshold", po::value<size_t>(&threshold)->default_value(1000), "Input pulse detection threshold (ADC counts)")
         ("pw", po::value<size_t>(&pulsewidth)->default_value(800), "Transmit pulse width in samples")
         ("delay", po::value<size_t>(&delay)->default_value(8000), "Delay from trigger to transmission in CE clock cycles")
+        ("pulse-gap", po::value<size_t>(&pulse_gap)->default_value(10000), "Gap between fixed and relative pulse in CE clock cycles")
+        ("save-data", po::bool_switch(&save_data)->default_value(false), "Save RX dBFS and GPS data to a binary file")
+        ("output-file", po::value<std::string>(&output_file)->default_value("combined_measurements.dat"),"Binary measurement output file")
+        ("gps", po::bool_switch(&enable_gps)->default_value(true), "Enable GPS data collection")
         ("avg-delay",po::value<size_t>(&avg_delay)->default_value(32),"Samples to wait after trigger before averaging")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(200000000.0), "Rx RF center frequency in Hz")
         ("tx-freq", po::value<double>(&tx_freq)->default_value(200000000.0), "Tx RF center frequency in Hz")
@@ -147,8 +329,13 @@ siggen->set_avg_start_delay(avg_delay, port);
 siggen->set_threshold(threshold /*LSBs*/, port);   // pick based on RX magnitude
 //siggen->set_holdcount(holdcount /*LSBs*/, port);   
 siggen->set_delay(delay /*ce_clk cycles*/, port);
+siggen->set_pulse_gap(pulse_gap, port);
 siggen->set_pulsewidth(pulsewidth /*samples*/, port);
     std::cout << "delay= " << siggen->get_delay(port) << " ce clk cycles " << std::endl;
+    std::cout << "pulse_gap= "
+          << siggen->get_pulse_gap(port)
+          << " ce clk cycles"
+          << std::endl;
     std::cout << "pulsewidth= " << siggen->get_pulsewidth(port) << " samples " << std::endl;
 const double thr_dbfs =
     (threshold > 0)
@@ -360,7 +547,45 @@ siggen->set_enable(true, port);
     rx_radio_ctrl->issue_stream_cmd(stream_cmd, rx_chan);
     std::cout << "Wait..." << std::endl;
 
+std::thread gps_thread;
 
+if (enable_gps) {
+    keep_gps_running.store(true);
+    gps_thread = std::thread(gps_stream_thread);
+}
+
+std::ofstream binary_file;
+
+if (save_data) {
+    binary_file.open(
+        output_file,
+        std::ios::out
+        | std::ios::binary
+        | std::ios::trunc
+    );
+
+    if (!binary_file.is_open()) {
+        keep_gps_running.store(false);
+
+        if (gps_thread.joinable()) {
+            gps_thread.join();
+        }
+
+        throw std::runtime_error(
+            "Could not open binary output file: "
+            + output_file
+        );
+    }
+
+    std::cout
+        << "Saving binary measurements to: "
+        << output_file
+        << std::endl;
+
+    std::cout
+        << "Binary record size: 68 bytes"
+        << std::endl;
+}
 
 
 uint32_t last_avg_power = 0;
@@ -368,46 +593,175 @@ uint32_t last_tx_amp    = 0;
 
 while (!stop_signal_called) {
 
-    uint32_t avg_power = siggen->get_avg_power(port);
-    uint32_t tx_amp    = siggen->get_tx_amp(port) & 0xFFFF;
+    const uint32_t avg_power =
+        siggen->get_avg_power(port);
 
-    if ((avg_power != last_avg_power) || (tx_amp != last_tx_amp)) {
+    const uint32_t tx_amp =
+        siggen->get_tx_amp(port) & 0xFFFF;
 
-        double rx_amp =
+    /*
+     * avg_power and tx_amp are still required:
+     *
+     * 1. They indicate that a new FPGA result is available.
+     * 2. avg_power is used to calculate RX dBFS.
+     * 3. tx_amp is used for the existing GUI display.
+     *
+     * They are not written to the binary file.
+     */
+    if ((avg_power != last_avg_power)
+        || (tx_amp != last_tx_amp)) {
+
+        const double rx_amp =
             (avg_power > 0)
-            ? std::sqrt((double)avg_power)
+            ? std::sqrt(static_cast<double>(avg_power))
             : 0.0;
 
-        double rx_dbfs =
+        const double rx_dbfs =
             (rx_amp > 0.0)
             ? 20.0 * std::log10(rx_amp / 32767.0)
             : -200.0;
 
-        double tx_dbfs =
+        const double tx_dbfs =
             (tx_amp > 0)
-            ? 20.0 * std::log10((double)tx_amp / 32767.0)
+            ? 20.0 * std::log10(
+                static_cast<double>(tx_amp) / 32767.0
+            )
             : -200.0;
 
+        /*
+         * Keep the existing console output.
+         * The GUI still reads these fields.
+         */
         std::cout
-            << "RX_dBFS=" << std::fixed << std::setprecision(2)
+            << "RX_dBFS="
+            << std::fixed
+            << std::setprecision(2)
             << rx_dbfs
             << " TX_dBFS=" << tx_dbfs
             << " AVG_POWER=" << avg_power
             << " TX_AMP=" << tx_amp
             << std::endl;
 
+        if (save_data && binary_file.is_open()) {
+
+            const auto system_now =
+                std::chrono::system_clock::now();
+
+            const uint64_t system_time_us =
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        system_now.time_since_epoch()
+                    ).count()
+                );
+
+            auto [
+                gps_time,
+                latitude_string,
+                longitude_string,
+                altitude_string
+            ] = get_latest_gps_data();
+
+            double latitude  = 0.0;
+            double longitude = 0.0;
+            double altitude  = 0.0;
+
+            /*
+             * Zero means no valid GPS value.
+             * The GPS time string will contain
+             * "No GPS Time" until GPS is available.
+             */
+            if (enable_gps) {
+                try {
+                    if (latitude_string != "No Latitude") {
+                        latitude = std::stod(latitude_string);
+                    }
+
+                    if (longitude_string != "No Longitude") {
+                        longitude = std::stod(longitude_string);
+                    }
+
+                    if (altitude_string != "No Altitude") {
+                        altitude = std::stod(altitude_string);
+                    }
+                }
+                catch (const std::exception& ex) {
+                    std::cerr
+                        << "[GPS] Conversion error: "
+                        << ex.what()
+                        << std::endl;
+
+                    latitude  = 0.0;
+                    longitude = 0.0;
+                    altitude  = 0.0;
+                }
+            }
+            else {
+                gps_time = "GPS Disabled";
+            }
+
+            write_binary_measurement(
+                binary_file,
+                system_time_us,
+                gps_time,
+                latitude,
+                longitude,
+                altitude,
+                static_cast<float>(rx_dbfs)
+            );
+
+            if (!binary_file.good()) {
+                std::cerr
+                    << "Error writing binary measurement"
+                    << std::endl;
+
+                stop_signal_called = true;
+            }
+
+            /*
+             * Flush each measurement so data is not lost
+             * if power is removed unexpectedly.
+             *
+             * Remove this flush later if the measurement
+             * rate becomes very high.
+             */
+            binary_file.flush();
+        }
+
         last_avg_power = avg_power;
         last_tx_amp    = tx_amp;
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(100)
+    );
 }
 
     // Stop radio
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     std::cout << "Issuing stop stream cmd..." << std::endl;
-    rx_radio_ctrl->issue_stream_cmd(stream_cmd, rx_chan);
-    std::cout << "Done" << std::endl;
+    rx_radio_ctrl->issue_stream_cmd(
+    stream_cmd,
+    rx_chan
+);
+
+keep_gps_running.store(false);
+
+if (gps_thread.joinable()) {
+    gps_thread.join();
+}
+
+if (binary_file.is_open()) {
+    binary_file.close();
+
+    std::cout
+        << "Binary measurement file closed: "
+        << output_file
+        << std::endl;
+}
+
+std::cout << "Done" << std::endl;
     // Allow for the samples and ACKs to propagate
     std::this_thread::sleep_for(100ms);
 

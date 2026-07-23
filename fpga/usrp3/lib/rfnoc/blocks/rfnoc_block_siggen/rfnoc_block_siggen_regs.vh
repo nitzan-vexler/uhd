@@ -158,3 +158,7 @@ localparam        REG_DBG_AVG_POWER_LEN = 32;
 
 localparam [19:0] REG_DBG_TX_AMP = 20'h00030;
 localparam        REG_DBG_TX_AMP_LEN = 16;
+
+// 0x34: gap between fixed and relative pulses, in ce_clk cycles
+localparam [19:0] REG_PULSE_GAP = 20'h00034;
+localparam        REG_PULSE_GAP_LEN = 32;

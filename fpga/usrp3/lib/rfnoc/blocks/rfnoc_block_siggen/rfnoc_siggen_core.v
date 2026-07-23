@@ -62,6 +62,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
   reg [REG_THRESHOLD_LEN-1:0]  reg_threshold  = 0;
   reg [REG_PULSEWIDTH_LEN-1:0] reg_pulsewidth = 16'd32;
   reg [REG_DELAY_LEN-1:0]      reg_delay      = 32'd0;
+  reg [REG_PULSE_GAP_LEN-1:0] reg_pulse_gap = 32'd10000;
   reg [REG_AVG_START_DELAY_LEN-1:0] reg_avg_start_delay;
   reg [31:0] dbg_avg_power;
   reg [15:0] dbg_tx_amp;
@@ -86,6 +87,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
       reg_phase_inc_stb    <= 1'b0;
       reg_cartesian_stb    <= 1'b0;
       reg_avg_start_delay <= 8'd32;
+      reg_pulse_gap <= 32'd1000;
     end else begin
 
       // Default assignments
@@ -107,6 +109,7 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_PULSEWIDTH : reg_pulsewidth <= s_ctrlport_req_data[REG_PULSEWIDTH_LEN-1:0];
           REG_DELAY      : reg_delay      <= s_ctrlport_req_data[REG_DELAY_LEN-1:0];
           REG_AVG_START_DELAY : reg_avg_start_delay <= s_ctrlport_req_data[REG_AVG_START_DELAY_LEN-1:0];
+          REG_PULSE_GAP: reg_pulse_gap <= s_ctrlport_req_data[REG_PULSE_GAP_LEN-1:0];
               REG_PHASE_INC : begin
             reg_phase_inc     <= s_ctrlport_req_data[REG_PHASE_INC_LEN-1:0];
             reg_phase_inc_stb <= 1'b1;
@@ -134,8 +137,8 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_DELAY      : s_ctrlport_resp_data[REG_DELAY_LEN-1:0]      <= reg_delay;
           REG_DBG_AVG_POWER : s_ctrlport_resp_data <= dbg_avg_power;
           REG_DBG_TX_AMP    : s_ctrlport_resp_data <= {16'd0, dbg_tx_amp};
-          REG_AVG_START_DELAY :
-    s_ctrlport_resp_data[REG_AVG_START_DELAY_LEN-1:0] <= reg_avg_start_delay;
+          REG_AVG_START_DELAY : s_ctrlport_resp_data[REG_AVG_START_DELAY_LEN-1:0] <= reg_avg_start_delay;
+          REG_PULSE_GAP:  s_ctrlport_resp_data[REG_PULSE_GAP_LEN-1:0] <= reg_pulse_gap;
         endcase
       end
     end
@@ -190,16 +193,20 @@ end
 wire trig_pulse = over_thr_d & ~over_thr_q;
 
 
-localparam [2:0]
-    ST_IDLE       = 3'd0,
-    ST_WAIT_AVG   = 3'd1,
-    ST_PEAK       = 3'd2,
-    ST_DELAY      = 3'd3,
-    ST_BURST      = 3'd4;
-    
-reg [7:0] avg_delay_ctr;
-reg [2:0] state;
+localparam [3:0]
+    ST_IDLE          = 4'd0,
+    ST_WAIT_AVG      = 4'd1,
+    ST_PEAK          = 4'd2,
+    ST_FIXED_DELAY   = 4'd3,
+    ST_FIXED_BURST   = 4'd4,
+    ST_REL_GAP       = 4'd5,
+    ST_REL_BURST     = 4'd6;
 
+reg [7:0] avg_delay_ctr;
+reg [3:0] state;
+// Temporary delay between fixed and relative pulses.
+// This counts CE clock cycles, like reg_delay.
+localparam [31:0] RELATIVE_GAP_CYCLES = 32'd10000;
 // Counters (match your register widths)
 reg [REG_DELAY_LEN-1:0]      delay_ctr;
 reg [REG_PULSEWIDTH_LEN-1:0] pw_ctr;
@@ -212,7 +219,16 @@ reg [7:0] peak_cnt;
 reg        peak_search_active;
 
 reg [31:0] trigger_sample;
+// Fixed pulse uses the configured gain value directly.
+// Q = 0, so this is currently a constant-phase output.
+wire [15:0] fixed_tx_amp = reg_gain[15:0];
 
+wire [31:0] fixed_tx_sample = {
+    fixed_tx_amp,
+    16'd0
+};
+
+wire [31:0] relative_tx_sample = trigger_sample;
 
 reg [6:0] tail_ctr;
 reg tail_active;
@@ -263,83 +279,104 @@ wire [15:0] tx_amp_from_power = isqrt_sat16(avg_power_128);
     
 always @(posedge clk) begin
   if (rst) begin
-    state            <= ST_IDLE;
-    delay_ctr        <= {REG_DELAY_LEN{1'b0}};
-    pw_ctr           <= {REG_PULSEWIDTH_LEN{1'b0}};
-    fsm_burst_active <= 1'b0;
-    tail_active      <= 1'b0;
-    tail_ctr         <= 0;
+    state              <= ST_IDLE;
+    delay_ctr          <= {REG_DELAY_LEN{1'b0}};
+    pw_ctr             <= {REG_PULSEWIDTH_LEN{1'b0}};
+    fsm_burst_active   <= 1'b0;
+    tail_active        <= 1'b0;
+    tail_ctr           <= 7'd0;
 
     peak_cnt           <= 8'd0;
     peak_search_active <= 1'b0;
     trigger_sample     <= 32'd0;
-    power_accum <= 48'd0;
-    dbg_avg_power      <= 32'd0;   // MOVE HERE
-    dbg_tx_amp      <= 16'd0;   // MOVE HERE
-    avg_delay_ctr <= 8'd0;
-
-
+    power_accum        <= 48'd0;
+    dbg_avg_power      <= 32'd0;
+    dbg_tx_amp         <= 16'd0;
+    avg_delay_ctr      <= 8'd0;
 
   end else if (use_trigger) begin
     case (state)
 
+      // ---------------------------------------------------
+      // Wait for a new trigger
+      // ---------------------------------------------------
       ST_IDLE: begin
-        fsm_burst_active <= 1'b0;
-        tail_active      <= 1'b0;
+        fsm_burst_active   <= 1'b0;
+        tail_active        <= 1'b0;
         peak_search_active <= 1'b0;
 
-if (trig_pulse) begin
-  peak_search_active <= 1'b0;
-avg_delay_ctr <= reg_avg_start_delay;
-  power_accum        <= 48'd0;
-  state              <= ST_WAIT_AVG;
-end
+        if (trig_pulse) begin
+          avg_delay_ctr      <= reg_avg_start_delay;
+          power_accum        <= 48'd0;
+          peak_search_active <= 1'b0;
+          state              <= ST_WAIT_AVG;
+        end
       end
 
-ST_WAIT_AVG: begin
-  if (s_tvalid) begin
-    if (avg_delay_ctr != 0) begin
-      avg_delay_ctr <= avg_delay_ctr - 1;
-    end else begin
-      peak_search_active <= 1'b1;
-      peak_cnt           <= PEAK_SEARCH_SAMPLES - 1;
-      power_accum        <= {15'd0, mag_sq};
-      state              <= ST_PEAK;
-    end
-  end
-end
-
-ST_PEAK: begin
-  if (s_tvalid) begin
-power_accum <= power_accum_next;
-    if (peak_cnt != 0) begin
-      peak_cnt <= peak_cnt - 1;
-    end else begin
-      peak_search_active <= 1'b0;
-dbg_tx_amp <= tx_amp_from_power;
-dbg_avg_power <= avg_power_128[31:0];
-trigger_sample <= {tx_amp_from_power, 16'sd0};
-
-      delay_ctr <= reg_delay;
-      pw_ctr    <= reg_pulsewidth;
-      state     <= (reg_delay == 0) ? ST_BURST : ST_DELAY;
-    end
-  end
-end
-
-      ST_DELAY: begin
-        if (delay_ctr != 0)
-          delay_ctr <= delay_ctr - 1;
-        else
-          state <= ST_BURST;
+      // ---------------------------------------------------
+      // Wait before beginning the amplitude measurement
+      // ---------------------------------------------------
+      ST_WAIT_AVG: begin
+        if (s_tvalid) begin
+          if (avg_delay_ctr != 0) begin
+            avg_delay_ctr <= avg_delay_ctr - 1'b1;
+          end else begin
+            peak_search_active <= 1'b1;
+            peak_cnt           <= PEAK_SEARCH_SAMPLES - 1;
+            power_accum        <= {15'd0, mag_sq};
+            state              <= ST_PEAK;
+          end
+        end
       end
 
-      ST_BURST: begin
+      // ---------------------------------------------------
+      // Measure trigger amplitude over 128 samples
+      // ---------------------------------------------------
+      ST_PEAK: begin
+        if (s_tvalid) begin
+          power_accum <= power_accum_next;
+
+          if (peak_cnt != 0) begin
+            peak_cnt <= peak_cnt - 1'b1;
+          end else begin
+            peak_search_active <= 1'b0;
+
+            dbg_tx_amp     <= tx_amp_from_power;
+            dbg_avg_power  <= avg_power_128[31:0];
+            trigger_sample <= {tx_amp_from_power, 16'd0};
+
+            delay_ctr <= reg_delay;
+            pw_ctr    <= reg_pulsewidth;
+
+            if (reg_delay == 0)
+              state <= ST_FIXED_BURST;
+            else
+              state <= ST_FIXED_DELAY;
+          end
+        end
+      end
+
+      // ---------------------------------------------------
+      // Delay from measurement completion to fixed pulse
+      // ---------------------------------------------------
+      ST_FIXED_DELAY: begin
+        if (delay_ctr != 0) begin
+          delay_ctr <= delay_ctr - 1'b1;
+        end else begin
+          pw_ctr <= reg_pulsewidth;
+          state  <= ST_FIXED_BURST;
+        end
+      end
+
+      // ---------------------------------------------------
+      // First pulse: fixed amplitude
+      // ---------------------------------------------------
+      ST_FIXED_BURST: begin
         fsm_burst_active <= 1'b1;
 
         if (sample_fire && !tail_active) begin
           if (pw_ctr > 1) begin
-            pw_ctr <= pw_ctr - 1;
+            pw_ctr <= pw_ctr - 1'b1;
           end else begin
             pw_ctr      <= 0;
             tail_active <= 1'b1;
@@ -348,9 +385,52 @@ end
         end
 
         if (tail_active) begin
-          if (tail_ctr != 0)
-            tail_ctr <= tail_ctr - 1;
-          else begin
+          if (tail_ctr != 0) begin
+            tail_ctr <= tail_ctr - 1'b1;
+          end else begin
+            fsm_burst_active <= 1'b0;
+            tail_active      <= 1'b0;
+
+            delay_ctr <= reg_pulse_gap;
+            state     <= ST_REL_GAP;
+          end
+        end
+      end
+
+      // ---------------------------------------------------
+      // Gap between fixed and relative pulses
+      // ---------------------------------------------------
+      ST_REL_GAP: begin
+        fsm_burst_active <= 1'b0;
+
+        if (delay_ctr != 0) begin
+          delay_ctr <= delay_ctr - 1'b1;
+        end else begin
+          pw_ctr <= reg_pulsewidth;
+          state  <= ST_REL_BURST;
+        end
+      end
+
+      // ---------------------------------------------------
+      // Second pulse: relative amplitude
+      // ---------------------------------------------------
+      ST_REL_BURST: begin
+        fsm_burst_active <= 1'b1;
+
+        if (sample_fire && !tail_active) begin
+          if (pw_ctr > 1) begin
+            pw_ctr <= pw_ctr - 1'b1;
+          end else begin
+            pw_ctr      <= 0;
+            tail_active <= 1'b1;
+            tail_ctr    <= PIPE_LATENCY[6:0];
+          end
+        end
+
+        if (tail_active) begin
+          if (tail_ctr != 0) begin
+            tail_ctr <= tail_ctr - 1'b1;
+          end else begin
             fsm_burst_active <= 1'b0;
             tail_active      <= 1'b0;
             state            <= ST_IDLE;
@@ -359,30 +439,44 @@ end
       end
 
       default: begin
-        state            <= ST_IDLE;
-        fsm_burst_active <= 1'b0;
-        tail_active      <= 1'b0;
+        state              <= ST_IDLE;
+        fsm_burst_active   <= 1'b0;
+        tail_active        <= 1'b0;
         peak_search_active <= 1'b0;
       end
 
     endcase
+
   end else begin
-    state            <= ST_IDLE;
-    fsm_burst_active <= 1'b0;
-    tail_active      <= 1'b0;
+    state              <= ST_IDLE;
+    fsm_burst_active   <= 1'b0;
+    tail_active        <= 1'b0;
     peak_search_active <= 1'b0;
   end
 end
 
-
 // Track previous state to detect entering ST_BURST
-reg [2:0] prev_state;
-always @(posedge clk) begin
-  if (rst) prev_state <= ST_IDLE;
-  else     prev_state <= state;
-end
-wire burst_start = use_trigger && (prev_state != ST_BURST) && (state == ST_BURST);
+reg [3:0] prev_state;
 
+always @(posedge clk) begin
+  if (rst)
+    prev_state <= ST_IDLE;
+  else
+    prev_state <= state;
+end
+
+wire fixed_burst_start =
+    use_trigger
+    && (prev_state != ST_FIXED_BURST)
+    && (state == ST_FIXED_BURST);
+
+wire relative_burst_start =
+    use_trigger
+    && (prev_state != ST_REL_BURST)
+    && (state == ST_REL_BURST);
+
+wire burst_start =
+    fixed_burst_start || relative_burst_start;
 
 
 
@@ -511,10 +605,26 @@ wire allow_output = reg_enable & (use_trigger ? burst_active : 1'b1);
 wire axis_rx_tready;
 
 
-wire [31:0] repeat_tdata;
-wire        repeat_tvalid;
-assign repeat_tdata  = use_trigger ? trigger_sample : axis_round_tdata;
-assign repeat_tvalid = use_trigger ? allow_output    : axis_round_tvalid;
+wire output_fixed_pulse =
+    (state == ST_FIXED_BURST);
+
+wire output_relative_pulse =
+    (state == ST_REL_BURST);
+
+wire [31:0] selected_trigger_sample =
+    output_fixed_pulse
+        ? fixed_tx_sample
+        : relative_tx_sample;
+
+wire [31:0] repeat_tdata =
+    use_trigger
+        ? selected_trigger_sample
+        : axis_round_tdata;
+
+wire repeat_tvalid =
+    use_trigger
+        ? allow_output
+        : axis_round_tvalid;
 
 //----------------------------------------------
 // Packetizer

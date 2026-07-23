@@ -33,7 +33,7 @@ const uint32_t siggen_block_control::REG_DELAY_OFFSET       = 0x24;
 const uint32_t siggen_block_control::REG_AVG_START_DELAY_OFFSET   = 0x28;
 const uint32_t siggen_block_control::REG_DBG_AVG_POWER_OFFSET = 0x2C;
 const uint32_t siggen_block_control::REG_DBG_TX_AMP_OFFSET = 0x30;
-
+const uint32_t siggen_block_control::REG_PULSE_GAP_OFFSET = 0x34;
 
 
 
@@ -48,6 +48,7 @@ const char* const PROP_KEY_THRESHOLD         = "threshold";
 const char* const PROP_KEY_PULSEWIDTH       = "pulsewidth";
 const char* const PROP_KEY_DELAY          = "delay";
 const char* const PROP_KEY_AVG_START_DELAY = "avg_start_delay";
+const char* const PROP_KEY_PULSE_GAP = "pulse_gap";
 
 namespace {
 template <class T>
@@ -155,6 +156,16 @@ public:
         return _prop_delay.at(port).get();
     }
     
+    void set_pulse_gap(const double gap, const size_t port) override
+{
+    set_property<double>(PROP_KEY_PULSE_GAP, gap, port);
+}
+
+double get_pulse_gap(const size_t port) const override
+{
+    return _prop_pulse_gap.at(port).get();
+}
+    
     
         void set_pulsewidth(const double pulsewidth, const size_t port) override
     {
@@ -209,6 +220,7 @@ private:
 _prop_threshold.reserve(num_outputs);
 _prop_pulsewidth.reserve(num_outputs);
 _prop_delay.reserve(num_outputs);
+_prop_pulse_gap.reserve(num_outputs);
 _prop_avg_start_delay.reserve(num_outputs);
 
 
@@ -305,6 +317,17 @@ _prop_avg_start_delay.reserve(num_outputs);
 				const uint32_t dly = (v < 0.0) ? 0u : uint32_t(v);
 				_siggen_reg_iface.poke32(REG_DELAY_OFFSET, dly, port);
 			});
+			
+			_prop_pulse_gap.emplace_back(property_t<double>{
+    PROP_KEY_PULSE_GAP, 10000.0, {res_source_info::USER, port}
+});
+
+register_property(&_prop_pulse_gap.back(), [this, port]() {
+    const double value = _prop_pulse_gap.at(port).get();
+    const uint32_t gap = (value < 0.0) ? 0u : uint32_t(value);
+
+    _siggen_reg_iface.poke32(REG_PULSE_GAP_OFFSET, gap, port);
+});
             
 _prop_avg_start_delay.emplace_back(property_t<int>{
     PROP_KEY_AVG_START_DELAY, 32, {res_source_info::USER, port}});
@@ -453,6 +476,7 @@ register_property(&_prop_avg_start_delay.back(), [this, port]() {
     std::vector<property_t<double>> _prop_threshold;
     std::vector<property_t<double>> _prop_pulsewidth;
     std::vector<property_t<double>> _prop_delay;
+    std::vector<property_t<double>> _prop_pulse_gap;
     std::vector<property_t<int>> _prop_avg_start_delay;
 
 

@@ -45,6 +45,7 @@ static const uint32_t REG_DELAY_OFFSET;       // 0x24
 static const uint32_t REG_AVG_START_DELAY_OFFSET;
 static const uint32_t REG_DBG_AVG_POWER_OFFSET;
 static const uint32_t REG_DBG_TX_AMP_OFFSET;
+static const uint32_t REG_PULSE_GAP_OFFSET; // 0x34
 
 
     /*! Set the function generator stream enable flag
@@ -211,6 +212,10 @@ virtual double get_pulsewidth(const size_t port) const = 0;
 // NEW: Delay in ce_clk cycles (0..0xFFFFFFFF)
 virtual void   set_delay(const double delay, const size_t port) = 0;
 virtual double get_delay(const size_t port) const = 0;
+
+// Gap between fixed and relative pulses, in ce_clk cycles
+virtual void set_pulse_gap(const double gap, const size_t port) = 0;
+virtual double get_pulse_gap(const size_t port) const = 0;
 
 // siggen_block_control.hpp (public API)
 virtual void set_avg_start_delay(const size_t delay, const size_t port) = 0;

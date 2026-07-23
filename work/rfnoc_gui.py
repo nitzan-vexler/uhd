@@ -109,7 +109,30 @@ def set_field_state(var, state):
         return False
 
     search(frame)
+def set_field_visible(var, visible):
+    def search(parent):
+        for widget in parent.winfo_children():
+            if (
+                isinstance(widget, ttk.Entry)
+                and widget.cget("textvariable") == str(var)
+            ):
+                row = widget.grid_info().get("row")
 
+                for sibling in parent.winfo_children():
+                    if sibling.grid_info().get("row") == row:
+                        if visible:
+                            sibling.grid()
+                        else:
+                            sibling.grid_remove()
+
+                return True
+
+            if search(widget):
+                return True
+
+        return False
+
+    search(frame)
 def browse_output_file():
     selected_mode = mode.get()
 
@@ -140,6 +163,7 @@ def browse_output_file():
 def update_fields_for_mode(*args):
     selected = mode.get()
     selected_target = execution_target.get()
+    set_field_visible(pulse_gap, False)
 
     # Hide all conditional sections first
     e312_frame.grid_remove()
@@ -171,7 +195,33 @@ def update_fields_for_mode(*args):
     # Restore SPP state by default
     set_field_state(spp, "normal")
 
-    if selected == "Pulse":
+    if selected in ("Pulse", "Combined Mode"):
+        if selected == "Combined Mode":
+            set_field_visible(pulse_gap, True)
+
+            file_frame.grid()
+            save_data_cb.grid()
+
+            if save_data.get():
+                set_field_visible(rx_output, True)
+                browse_output_button.grid()
+
+                if selected_target == "USRP E312":
+                    download_rx_button.grid()
+                else:
+                    download_rx_button.grid_remove()
+            else:
+                set_field_visible(rx_output, False)
+                browse_output_button.grid_remove()
+                download_rx_button.grid_remove()
+
+        else:
+            set_field_visible(pulse_gap, False)
+
+            file_frame.grid_remove()
+            save_data_cb.grid_remove()
+            download_rx_button.grid_remove()
+
         antenna_frame.grid()
         rx_frame.grid()
         tx_frame.grid()
@@ -554,54 +604,45 @@ def start_app():
     else:
 
         try:
-
             threshold_dbfs = float(threshold.get())
 
             thr = int(
-
                 round(
-
                     32767.0
-
                     * pow(10.0, threshold_dbfs / 20.0)
-
                 )
-
             )
+
+            thr = max(0, min(32767, thr))
 
             delay_us = float(delay.get())
 
             delay_counts = max(
-
                 0,
-
                 int(round((delay_us - 14.0) / 0.01))
-
             )
 
             pw_us = float(pulsewidth.get())
 
             pw_counts = max(
-
                 1,
-
                 int(round(pw_us * float(rate.get())))
-
             )
+
+            gap_counts = 0
+
+            if selected_mode == "Combined Mode":
+                gap_us = float(pulse_gap.get())
+
+                gap_counts = int(round(gap_us * 100.0))
 
 
         except ValueError:
-
             messagebox.showerror(
-
                 "Invalid input",
-
-                "Check threshold, delay, and pulse width values."
-
+                "Check threshold, delay, pulse width, and pulse gap values."
             )
-
             return
-
         pulse_args = [
             "--rx-freq", str(rx_freq_hz),
             "--tx-freq", str(tx_freq_hz),
@@ -621,6 +662,22 @@ def start_app():
             "--spp", spp.get(),
             "--rate", str(rate_sps),
         ]
+        if selected_mode == "Combined Mode":
+            pulse_args += [
+                "--pulse-gap",
+                str(gap_counts),
+            ]
+            if selected_target == "Host PC":
+                output_file = rx_output.get()
+            else:
+                output_file = REMOTE_RX_FILE
+
+            if save_data.get():
+                pulse_args += [
+                    "--save-data",
+                    "--output-file",
+                    output_file,
+                ]
 
         if rx_bw_hz > 0:
             pulse_args += [
@@ -654,7 +711,7 @@ def start_app():
 
             append_output(
 
-                "Starting Pulse app on Host PC:\n"
+                f"Starting {selected_mode} app on Host PC:\n"
 
                 + " ".join(cmd)
 
@@ -682,6 +739,10 @@ def start_app():
 
             target = f"{user}@{ip}"
 
+            remote_pulse_args = list(pulse_args)
+
+
+
             remote_command = (
                     f"export LD_LIBRARY_PATH="
                     f"{shlex.quote(REMOTE_UHD_LIB_DIR)}:"
@@ -694,7 +755,7 @@ def start_app():
                     f"exec {REMOTE_PULSE_APP} "
                     + " ".join(
                 shlex.quote(str(arg))
-                for arg in pulse_args
+                for arg in remote_pulse_args
             )
             )
 
@@ -714,7 +775,7 @@ def start_app():
 
             append_output(
 
-                f"Starting Pulse app on {target}:\n"
+                f"Starting {selected_mode} app on {target}:\n"
 
                 f"{remote_command}\n\n"
 
@@ -733,8 +794,8 @@ def start_app():
     def monitor():
         global proc
 
-        if selected_mode == "Pulse":
-            read_process_output(proc, "RFNoC app finished.")
+        if selected_mode in ("Pulse", "Combined Mode"):
+            read_process_output(proc, f"{selected_mode} app finished.")
 
         elif selected_mode == "CW":
             read_process_output(proc, "CW app finished.")
@@ -906,9 +967,12 @@ def stop_app():
             remote_pid_file = REMOTE_RX_PID_FILE
             app_name = "RX-to-File"
 
-        elif selected_mode == "Pulse":
+
+        elif selected_mode in ("Pulse", "Combined Mode"):
+
             remote_pid_file = REMOTE_PULSE_PID_FILE
-            app_name = "Pulse"
+
+            app_name = selected_mode
 
         else:
             remote_pid_file = None
@@ -1234,11 +1298,13 @@ mode_frame.columnconfigure(0, weight=1)
 
 mode = tk.StringVar(value="Pulse")
 execution_target = tk.StringVar(value="Host PC")
+save_data = tk.BooleanVar(value=True)
 
 mode_combo = ttk.Combobox(
     mode_frame,
     textvariable=mode,
     values=[
+        "Combined Mode",
         "Pulse",
         "CW",
         "RX to File",
@@ -1590,7 +1656,12 @@ pulsewidth = add_field(
     "Pulse width [us]",
     "10"
 )
-
+pulse_gap = add_field(
+    pulse_frame,
+    3,
+    "Pulse gap [us]",
+    "100"
+)
 
 # =========================================================
 # File parameters
@@ -1618,13 +1689,28 @@ rx_output = add_field(
     ),
 )
 
+save_data_cb = ttk.Checkbutton(
+    file_frame,
+    text="Save measurements to file",
+    variable=save_data,
+)
+
+save_data_cb.grid(
+    row=1,
+    column=0,
+    columnspan=2,
+    sticky="w",
+    padx=4,
+    pady=3,
+)
+
 browse_output_button = ttk.Button(
     file_frame,
     text="Choose output file",
     command=browse_output_file,
 )
 browse_output_button.grid(
-    row=1,
+    row=2,
     column=0,
     columnspan=2,
     pady=5,
@@ -1636,7 +1722,7 @@ download_rx_button = ttk.Button(
 )
 
 download_rx_button.grid(
-    row=2,
+    row=3,
     column=0,
     columnspan=2,
     pady=5,
@@ -1756,6 +1842,7 @@ ttk.Button(
 # Update visible sections whenever the mode changes
 mode.trace_add("write", update_fields_for_mode)
 execution_target.trace_add("write", update_fields_for_mode)
+save_data.trace_add("write", update_fields_for_mode)
 
 update_fields_for_mode()
 
