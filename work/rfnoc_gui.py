@@ -15,11 +15,13 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import math
 import sys
 
-APP_PULSE = "./rfnoc_radio_loopback"
-APP_CW = os.path.expanduser("~/workarea/uhd/work/cw.py")
-APP_RX = "./rfnoc_rx_to_file_host"
-APP_CONVERT = "./convert_samples_to_csv.py"
-WORKDIR = os.path.expanduser("~/workarea/uhd/work/build")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+WORKDIR = BASE_DIR
+APP_PULSE = os.path.join(BASE_DIR, "build/rfnoc_radio_loopback")
+APP_RX = os.path.join(BASE_DIR, "build/rfnoc_rx_to_file_host")
+APP_CW = os.path.join(BASE_DIR, "cw.py")
+APP_CONVERT = os.path.join(BASE_DIR, "convert_samples_to_csv.py")
 REMOTE_PULSE_DIR = "/home/work/fixed_power"
 REMOTE_PULSE_APP = "./rfnoc_radio_loopback"
 REMOTE_UHD_LIB_DIR = "/home/root/app/uhd_lib"
@@ -91,7 +93,7 @@ def update_plot_from_line(line):
 def add_field(parent, row, label, default):
     ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=4, pady=3)
     var = tk.StringVar(value=default)
-    ttk.Entry(parent, textvariable=var, width=24).grid(row=row, column=1, sticky="ew", padx=4, pady=3)
+    ttk.Entry(parent, textvariable=var, width=24).grid(row=row, column=1, sticky="ew", padx=1, pady=3)
     return var
 def set_field_state(var, state):
     def search(parent):
@@ -1166,7 +1168,7 @@ style = ttk.Style()
 style.configure(".", font=("TkDefaultFont", 10))
 # Left side: controls
 # Right side: plot and terminal
-root.columnconfigure(0, weight=1, minsize=450)
+root.columnconfigure(0, weight=1, minsize=300)
 root.columnconfigure(1, weight=2, minsize=750)
 root.rowconfigure(0, weight=1)
 

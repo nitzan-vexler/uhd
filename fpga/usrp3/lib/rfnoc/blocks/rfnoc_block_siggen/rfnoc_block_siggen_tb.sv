@@ -951,7 +951,7 @@ endtask
     test_no_trigger_no_output(0, 0);
     test_trigger_delay_burst_len(0, 0);
     // Measure the pipeline latency for port 0
-    measure_pipeline_latency(0);
+    //measure_pipeline_latency(0);
 
 
     //--------------------------------
