@@ -18,7 +18,7 @@ import sys
 APP_PULSE = "./rfnoc_radio_loopback"
 APP_CW = os.path.expanduser("~/workarea/uhd/work/cw.py")
 APP_RX = "./rfnoc_rx_to_file_host"
-APP_CONVERT = "./convert_samples_to_csv.py"
+APP_CONVERT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parser.py")
 WORKDIR = os.path.expanduser("~/workarea/uhd/work/build")
 REMOTE_PULSE_DIR = "/home/work/fixed_power"
 REMOTE_PULSE_APP = "./rfnoc_radio_loopback"
@@ -30,6 +30,7 @@ REMOTE_CW_PID_FILE = "/tmp/rfnoc_gui_cw.pid"
 REMOTE_RX_DIR = "/home/work/pulse_to_file"
 REMOTE_RX_APP = "./rfnoc_rx_to_file_custom"
 REMOTE_RX_FILE = f"{REMOTE_RX_DIR}/usrp_samples.dat"
+REMOTE_MEAS_FILE = f"{REMOTE_PULSE_DIR}/measurements.dat"
 REMOTE_RX_PID_FILE = "/tmp/rfnoc_gui_rx.pid"
 proc = None
 
@@ -200,6 +201,8 @@ def update_fields_for_mode(*args):
             set_field_visible(pulse_gap, True)
 
             file_frame.grid()
+            file_frame.config(text="Trigger Measurement File")
+            browse_output_button.config(text="Choose measurement file")
             save_data_cb.grid()
 
             if save_data.get():
@@ -670,7 +673,7 @@ def start_app():
             if selected_target == "Host PC":
                 output_file = rx_output.get()
             else:
-                output_file = REMOTE_RX_FILE
+                output_file = REMOTE_MEAS_FILE
 
             if save_data.get():
                 pulse_args += [
@@ -704,6 +707,7 @@ def start_app():
                 APP_PULSE,
 
                 *pulse_args,
+
 
             ]
 
@@ -1060,10 +1064,23 @@ def download_rx_recording():
     if local_directory:
         os.makedirs(local_directory, exist_ok=True)
 
+    selected_mode = mode.get()
+
+    if selected_mode == "Combined Mode":
+        remote_file = REMOTE_MEAS_FILE
+    elif selected_mode == "RX to File":
+        remote_file = REMOTE_RX_FILE
+    else:
+        messagebox.showerror(
+            "Invalid mode",
+            "Download is only available for Combined Mode or RX to File."
+        )
+        return
+
     cmd = [
         "scp",
         "-o", "ConnectTimeout=5",
-        f"{target}:{REMOTE_RX_FILE}",
+        f"{target}:{remote_file}",
         local_file,
     ]
 
@@ -1691,7 +1708,7 @@ rx_output = add_field(
 
 save_data_cb = ttk.Checkbutton(
     file_frame,
-    text="Save measurements to file",
+    text="Save trigger measurements",
     variable=save_data,
 )
 

@@ -15,6 +15,13 @@ namespace uhd { namespace rfnoc {
 
 enum class siggen_waveform { CONSTANT, SINE_WAVE, NOISE };
 
+struct pulse_info
+{
+    uint16_t sequence;
+    uint64_t sample_index;
+    uint32_t avg_power;
+};
+
 /*! Siggen Control Class
  *
  * \ingroup rfnoc_blocks
@@ -46,6 +53,27 @@ static const uint32_t REG_AVG_START_DELAY_OFFSET;
 static const uint32_t REG_DBG_AVG_POWER_OFFSET;
 static const uint32_t REG_DBG_TX_AMP_OFFSET;
 static const uint32_t REG_PULSE_GAP_OFFSET; // 0x34
+static const uint32_t REG_PULSE_TIME_META_OFFSET; // 0x38
+static const uint32_t REG_PULSE_TIME_LO_OFFSET;   // 0x3C
+
+static const uint32_t REG_MEAS_FIFO_COUNT_OFFSET;
+static const uint32_t REG_MEAS_FIFO_META_OFFSET;
+static const uint32_t REG_MEAS_FIFO_TIME_LO_OFFSET;
+static const uint32_t REG_MEAS_FIFO_OVERFLOW_OFFSET;
+static const uint32_t REG_MEAS_FIFO_AVG_POWER_OFFSET;
+static const uint32_t REG_MEAS_FIFO_VALID_OFFSET;
+static const uint32_t REG_MEAS_FIFO_POP_OFFSET;
+
+virtual uint32_t get_measurement_fifo_count(
+    const size_t port = 0) = 0;
+
+virtual bool get_measurement_fifo_overflow(
+    const size_t port = 0) = 0;
+
+virtual bool pop_measurement_fifo(
+    pulse_info& result,
+    const size_t port = 0) = 0;
+
 
 
     /*! Set the function generator stream enable flag
@@ -225,7 +253,9 @@ virtual uint32_t get_avg_power(const size_t port = 0) = 0;
 
 virtual uint32_t get_tx_amp(const size_t port = 0) = 0;
 
-
+virtual bool get_latest_pulse_measurement(
+    pulse_info& result,
+    const size_t port = 0) = 0;
 
     inline void set_sine_frequency(
         const double frequency, const double sample_rate, const size_t port)

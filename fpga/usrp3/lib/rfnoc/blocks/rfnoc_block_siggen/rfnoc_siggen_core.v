@@ -27,6 +27,7 @@ module rfnoc_siggen_core #(
   output reg         s_ctrlport_resp_ack,
   output reg  [31:0] s_ctrlport_resp_data,
   
+  // input data stream
   input  wire [31:0] s_tdata,
   input  wire        s_tvalid,
   input  wire        s_tlast,
@@ -69,6 +70,8 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
 
   reg reg_phase_inc_stb;
   reg reg_cartesian_stb;
+  reg meas_fifo_pop_req;
+
 
   always @(posedge clk) begin
     if (rst) begin
@@ -88,13 +91,17 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
       reg_cartesian_stb    <= 1'b0;
       reg_avg_start_delay <= 8'd32;
       reg_pulse_gap <= 32'd1000;
+      meas_fifo_pop_req <= 1'b0;
     end else begin
 
       // Default assignments
-      s_ctrlport_resp_ack  <= 1'b0;
-      s_ctrlport_resp_data <= 0;
-      reg_phase_inc_stb    <= 1'b0;
-      reg_cartesian_stb    <= 1'b0;
+s_ctrlport_resp_ack  <= 1'b0;
+s_ctrlport_resp_data <= 0;
+reg_phase_inc_stb    <= 1'b0;
+reg_cartesian_stb    <= 1'b0;
+
+// One-clock pulse only
+meas_fifo_pop_req    <= 1'b0;
 
       // Handle register writes
       if (s_ctrlport_req_wr) begin
@@ -118,6 +125,17 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
             reg_cartesian     <= s_ctrlport_req_data[REG_CARTESIAN_LEN-1:0];
             reg_cartesian_stb <= 1'b1;
           end
+          REG_MEAS_FIFO_POP: begin
+
+    if (s_ctrlport_req_data[0] &&
+        (meas_fifo_count != 0) &&
+        meas_read_valid) begin
+
+        meas_fifo_pop_req <= 1'b1;
+
+    end
+
+end
         endcase
       end
 
@@ -139,6 +157,75 @@ assign s_tready = 1'b1;   // always ready to sample input for trigger detection
           REG_DBG_TX_AMP    : s_ctrlport_resp_data <= {16'd0, dbg_tx_amp};
           REG_AVG_START_DELAY : s_ctrlport_resp_data[REG_AVG_START_DELAY_LEN-1:0] <= reg_avg_start_delay;
           REG_PULSE_GAP:  s_ctrlport_resp_data[REG_PULSE_GAP_LEN-1:0] <= reg_pulse_gap;
+          REG_PULSE_TIME_META: begin
+  s_ctrlport_resp_data <= {
+    dbg_pulse_sequence,
+    dbg_pulse_sample_index[47:32]
+  };
+  
+end
+
+REG_PULSE_TIME_LO: begin
+  s_ctrlport_resp_data <= dbg_pulse_sample_index[31:0];
+end
+
+REG_MEAS_FIFO_COUNT: begin
+    s_ctrlport_resp_data <= {
+        21'd0,
+        meas_fifo_count
+    };
+end
+
+REG_MEAS_FIFO_OVERFLOW: begin
+    s_ctrlport_resp_data <= {
+        31'd0,
+        meas_fifo_overflow
+    };
+end
+REG_MEAS_FIFO_META: begin
+
+    if (meas_read_valid)
+        s_ctrlport_resp_data <= {
+            meas_read_sequence,
+            meas_read_timestamp[47:32]
+        };
+    else
+        s_ctrlport_resp_data <= 32'd0;
+
+end
+
+
+REG_MEAS_FIFO_TIME_LO: begin
+
+    if (meas_read_valid)
+        s_ctrlport_resp_data <=
+            meas_read_timestamp[31:0];
+    else
+        s_ctrlport_resp_data <= 32'd0;
+
+end
+
+
+REG_MEAS_FIFO_AVG_POWER: begin
+
+    if (meas_read_valid)
+        s_ctrlport_resp_data <=
+            meas_read_avg_power;
+    else
+        s_ctrlport_resp_data <= 32'd0;
+
+end
+
+
+REG_MEAS_FIFO_VALID: begin
+
+    s_ctrlport_resp_data <= {
+        31'd0,
+        meas_read_valid
+    };
+
+end
+
         endcase
       end
     end
@@ -192,15 +279,103 @@ end
 
 wire trig_pulse = over_thr_d & ~over_thr_q;
 
+// Count every accepted RX sample.
+//
+// s_tready is permanently asserted in this design, but use the
+// complete AXI handshake expression for correctness.
+wire rx_sample_fire = s_tvalid && s_tready;
+
+reg [63:0] rx_sample_counter;
+
+// Timestamp captured at the threshold crossing.
+reg [63:0] trigger_sample_timestamp;
+
+// Published measurement timestamp and sequence.
+reg [47:0] dbg_pulse_sample_index;
+reg [15:0] dbg_pulse_sequence;
+
+// ------------------------------------------------------------------
+// Measurement FIFO
+//
+// One entry =
+//   [95:64] average RX power
+//   [63:48] sequence
+//   [47:0]  sample index
+//
+// 96 bits per pulse.
+// ------------------------------------------------------------------
+// Xilinx FIFO Generator v13.2: common-clock, 96-bit, 1024-deep, FWFT.
+// In FWFT mode, dout is the oldest entry whenever empty == 0.
+wire [95:0] meas_fifo_dout;
+wire        meas_fifo_full;
+wire        meas_fifo_empty;
+wire [10:0] meas_fifo_count;
+reg         meas_fifo_overflow;
+
+wire meas_read_valid = !meas_fifo_empty;
+wire [31:0] meas_read_avg_power = meas_fifo_dout[95:64];
+wire [15:0] meas_read_sequence = meas_fifo_dout[63:48];
+wire [47:0] meas_read_timestamp = meas_fifo_dout[47:0];
+
+// pop_req is registered by CtrlPort. It is consumed at the next clock.
+wire meas_fifo_rd_en = meas_fifo_pop_req && !meas_fifo_empty;
+// Only accepted writes reach the FIFO; preserve a sticky overflow flag.
+wire meas_fifo_wr_en = meas_fifo_push_req && !meas_fifo_full && !rst;
+
+wire [95:0] meas_fifo_push_data;
+
+assign meas_fifo_push_data = {
+    avg_power_128[31:0],
+    dbg_pulse_sequence + 16'd1,
+    trigger_sample_timestamp[47:0]
+};
+
+fifo_generator_0 meas_fifo_i (
+    .clk        (clk),
+    .srst       (rst),
+    .din        (meas_fifo_push_data),
+    .wr_en      (meas_fifo_wr_en),
+    .rd_en      (meas_fifo_rd_en),
+    .dout       (meas_fifo_dout),
+    .full       (meas_fifo_full),
+    .empty      (meas_fifo_empty),
+    .data_count (meas_fifo_count)
+);
+
+always @(posedge clk) begin
+    if (rst)
+        meas_fifo_overflow <= 1'b0;
+    else if (meas_fifo_push_req && meas_fifo_full)
+        meas_fifo_overflow <= 1'b1;
+end
+
+always @(posedge clk) begin
+  if (rst) begin
+    rx_sample_counter        <= 64'd0;
+    trigger_sample_timestamp <= 64'd0;
+  end else begin
+    if (rx_sample_fire)
+      rx_sample_counter <= rx_sample_counter + 64'd1;
+
+    /*
+     * trig_pulse is generated from a registered threshold comparison.
+     * At this point the counter has already advanced past the triggering
+     * sample, so subtract one.
+     */
+    if (trig_pulse)
+      trigger_sample_timestamp <= rx_sample_counter - 64'd1;
+  end
+end
 
 localparam [3:0]
     ST_IDLE          = 4'd0,
     ST_WAIT_AVG      = 4'd1,
     ST_PEAK          = 4'd2,
-    ST_FIXED_DELAY   = 4'd3,
-    ST_FIXED_BURST   = 4'd4,
-    ST_REL_GAP       = 4'd5,
-    ST_REL_BURST     = 4'd6;
+    ST_WAIT_SQRT     = 4'd3,
+    ST_FIXED_DELAY   = 4'd4,
+    ST_FIXED_BURST   = 4'd5,
+    ST_REL_GAP       = 4'd6,
+    ST_REL_BURST     = 4'd7;
 
 reg [7:0] avg_delay_ctr;
 reg [3:0] state;
@@ -254,29 +429,45 @@ always @(posedge clk) begin
 end
 // synthesis translate_on
 
-function [15:0] isqrt_sat16;
-  input [39:0] x;
-  integer i;
-  reg [31:0] test;
-  begin
-    isqrt_sat16 = 16'd0;
 
-    for (i = 15; i >= 0; i = i - 1) begin
-      test = ({16'd0, isqrt_sat16} | (32'd1 << i));
-      if ((test * test) <= x)
-        isqrt_sat16[i] = 1'b1;
-    end
-  end
-endfunction
     
 reg [47:0] power_accum;
+// ------------------------------------------------------------------
+// Square-root CORDIC
+// avg_power -> sqrt(avg_power) -> relative TX amplitude
+// ------------------------------------------------------------------
+reg         sqrt_in_valid;
+reg  [31:0] sqrt_in_data;
+
+wire        sqrt_out_valid;
+wire [23:0] sqrt_out_data;
+
+
 
 wire [47:0] power_accum_next = power_accum + {15'd0, mag_sq};
 wire [39:0] avg_power_128 = power_accum_next[47:7]; // divide by 128
 
-wire [15:0] tx_amp_from_power = isqrt_sat16(avg_power_128);
 
-    
+wire meas_fifo_push_req =
+    use_trigger &&
+    (state == ST_PEAK) &&
+    s_tvalid &&
+    (peak_cnt == 0);
+
+
+
+cordic_0 sqrt_power_i (
+    .aclk                    (clk),
+    .aresetn                 (~rst),
+
+    .s_axis_cartesian_tvalid (sqrt_in_valid),
+    .s_axis_cartesian_tdata  (sqrt_in_data),
+
+    .m_axis_dout_tvalid      (sqrt_out_valid),
+    .m_axis_dout_tdata       (sqrt_out_data)
+);
+
+
 always @(posedge clk) begin
   if (rst) begin
     state              <= ST_IDLE;
@@ -293,8 +484,15 @@ always @(posedge clk) begin
     dbg_avg_power      <= 32'd0;
     dbg_tx_amp         <= 16'd0;
     avg_delay_ctr      <= 8'd0;
+    dbg_pulse_sample_index <= 48'd0;
+    dbg_pulse_sequence     <= 16'd0;
+    sqrt_in_valid <= 1'b0;
+sqrt_in_data  <= 32'd0;
+    
+
 
   end else if (use_trigger) begin
+  sqrt_in_valid <= 1'b0;
     case (state)
 
       // ---------------------------------------------------
@@ -322,7 +520,7 @@ always @(posedge clk) begin
             avg_delay_ctr <= avg_delay_ctr - 1'b1;
           end else begin
             peak_search_active <= 1'b1;
-            peak_cnt           <= PEAK_SEARCH_SAMPLES - 1;
+            peak_cnt           <= PEAK_SEARCH_SAMPLES - 2;
             power_accum        <= {15'd0, mag_sq};
             state              <= ST_PEAK;
           end
@@ -332,30 +530,60 @@ always @(posedge clk) begin
       // ---------------------------------------------------
       // Measure trigger amplitude over 128 samples
       // ---------------------------------------------------
-      ST_PEAK: begin
-        if (s_tvalid) begin
-          power_accum <= power_accum_next;
+ST_PEAK: begin
+    if (s_tvalid) begin
+        power_accum <= power_accum_next;
 
-          if (peak_cnt != 0) begin
+        if (peak_cnt != 0) begin
             peak_cnt <= peak_cnt - 1'b1;
-          end else begin
+        end
+        else begin
             peak_search_active <= 1'b0;
 
-            dbg_tx_amp     <= tx_amp_from_power;
-            dbg_avg_power  <= avg_power_128[31:0];
-            trigger_sample <= {tx_amp_from_power, 16'd0};
+            // Save average power
+            dbg_avg_power <= avg_power_128[31:0];
 
-            delay_ctr <= reg_delay;
-            pw_ctr    <= reg_pulsewidth;
+            // Send one transaction to CORDIC
+            sqrt_in_data  <= avg_power_128[31:0];
+            sqrt_in_valid <= 1'b1;
 
-            if (reg_delay == 0)
-              state <= ST_FIXED_BURST;
-            else
-              state <= ST_FIXED_DELAY;
-          end
+            // Publish measurement information
+            dbg_pulse_sample_index <= trigger_sample_timestamp[47:0];
+            dbg_pulse_sequence     <= dbg_pulse_sequence + 16'd1;
+
+            // Now wait for sqrt result
+            state <= ST_WAIT_SQRT;
         end
-      end
+    end
+end
 
+
+// ---------------------------------------------------
+// Wait for square-root CORDIC result
+// ---------------------------------------------------
+ST_WAIT_SQRT: begin
+
+    if (sqrt_out_valid) begin
+
+        // Saturate to maximum positive SC16 value
+        if (sqrt_out_data[16] || sqrt_out_data[15]) begin
+            dbg_tx_amp     <= 16'h7FFF;
+            trigger_sample <= {16'h7FFF, 16'd0};
+        end
+        else begin
+            dbg_tx_amp     <= sqrt_out_data[15:0];
+            trigger_sample <= {sqrt_out_data[15:0], 16'd0};
+        end
+
+        delay_ctr <= reg_delay;
+        pw_ctr    <= reg_pulsewidth;
+
+        if (reg_delay == 0)
+            state <= ST_FIXED_BURST;
+        else
+            state <= ST_FIXED_DELAY;
+    end
+end
       // ---------------------------------------------------
       // Delay from measurement completion to fixed pulse
       // ---------------------------------------------------

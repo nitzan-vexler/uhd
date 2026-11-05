@@ -722,6 +722,151 @@ task automatic test_no_trigger_no_output(
   test.end_test();
 endtask
 
+task automatic test_pulse_timestamp(
+    int port_in  = 0,
+    int port_out = 0
+);
+    item_t tx[$];
+
+    logic [31:0] meta_before;
+    logic [31:0] lo_before;
+    logic [15:0] seq_before;
+    logic [47:0] sample_before;
+
+    logic [31:0] meta_after;
+    logic [31:0] lo_after;
+    logic [15:0] seq_after;
+    logic [47:0] sample_after;
+
+    logic [47:0] sample_delta;
+
+    test.start_test("RX trigger timestamp", 2ms);
+
+    // Configure block
+    write_reg(port_out, REG_ENABLE,          0);
+    flush_output(port_out);
+
+    write_reg(port_out, REG_SPP,             64);
+    write_reg(port_out, REG_GAIN,            16'h7FFF);
+    write_reg(port_out, REG_PHASE_INC,       16'd64);
+    write_reg(
+        port_out,
+        REG_CARTESIAN,
+        {16'sh7FFF, 16'sh0000}
+    );
+
+    write_reg(port_out, REG_THRESHOLD,       16'd500);
+    write_reg(port_out, REG_AVG_START_DELAY, 0);
+    write_reg(port_out, REG_PULSEWIDTH,      64);
+    write_reg(port_out, REG_DELAY,           0);
+    write_reg(port_out, REG_PULSE_GAP,       100);
+
+    /*
+     * Read the current snapshot before generating the new trigger.
+     */
+    read_reg(port_out, REG_PULSE_TIME_META, meta_before);
+    read_reg(port_out, REG_PULSE_TIME_LO,   lo_before);
+
+    seq_before    = meta_before[31:16];
+    sample_before = {meta_before[15:0], lo_before};
+
+    $display(
+        "Before trigger: sequence=%0d sample_index=%0d",
+        seq_before,
+        sample_before
+    );
+
+    write_reg(port_out, REG_ENABLE, 1);
+
+    //-------------------------------------------------------
+    // Generate one RX input pulse
+    //-------------------------------------------------------
+    tx.delete();
+
+    // 64 accepted samples before threshold crossing
+    repeat (64)
+        tx.push_back(pack_iq(16'sd200, 16'sd0));
+
+    // One continuous above-threshold region = one trigger edge
+    repeat (300)
+        tx.push_back(pack_iq(16'sd4000, 16'sd0));
+
+    repeat (300)
+        tx.push_back(pack_iq(16'sd200, 16'sd0));
+
+    blk_ctrl.send_items(port_in, tx);
+
+    /*
+     * Wait for averaging and both generated TX pulses.
+     */
+    #(CE_CLK_PER * 5000);
+
+    //-------------------------------------------------------
+    // Read the new published snapshot
+    //-------------------------------------------------------
+    read_reg(port_out, REG_PULSE_TIME_META, meta_after);
+    read_reg(port_out, REG_PULSE_TIME_LO,   lo_after);
+
+    seq_after    = meta_after[31:16];
+    sample_after = {meta_after[15:0], lo_after};
+
+    sample_delta = sample_after - sample_before;
+
+    $display(
+        "After trigger: sequence=%0d sample_index=%0d delta=%0d",
+        seq_after,
+        sample_after,
+        sample_delta
+    );
+
+    //-------------------------------------------------------
+    // Checks
+    //-------------------------------------------------------
+
+    `ASSERT_ERROR(
+        seq_after == (seq_before + 16'd1),
+        "One RX trigger should increment sequence exactly once"
+    );
+
+    /*
+     * The new pulse starts after 64 below-threshold samples.
+     *
+     * sample_before is the timestamp of the previous pulse, not the
+     * current input-stream start, so sample_delta may include samples
+     * sent by other tests. Therefore only check that it increased here.
+     */
+    `ASSERT_ERROR(
+        sample_after > sample_before,
+        "Pulse timestamp should increase"
+    );
+
+    /*
+     * Reading the snapshot again without another trigger must return
+     * exactly the same result.
+     */
+    begin
+        logic [31:0] meta_stable;
+        logic [31:0] lo_stable;
+
+        read_reg(port_out, REG_PULSE_TIME_META, meta_stable);
+        read_reg(port_out, REG_PULSE_TIME_LO,   lo_stable);
+
+        `ASSERT_ERROR(
+            meta_stable == meta_after,
+            "Pulse metadata changed without a new trigger"
+        );
+
+        `ASSERT_ERROR(
+            lo_stable == lo_after,
+            "Pulse timestamp changed without a new trigger"
+        );
+    end
+
+    write_reg(port_out, REG_ENABLE, 0);
+    flush_output(port_out);
+
+    test.end_test();
+endtask
 
 // Single over-threshold sample -> wait for delay -> see one burst.
 task automatic test_trigger_delay_burst_len(
@@ -889,6 +1034,802 @@ endtask
     test.end_test();
   endtask : test_packet_length
 
+task automatic test_measurement_fifo(
+    int port_in  = 0,
+    int port_out = 0
+);
+    item_t tx[$];
+
+    logic [31:0] count_rb;
+    logic [31:0] meta_rb;
+    logic [31:0] lo_rb;
+    logic [31:0] power_rb;
+
+    logic [15:0] seq0;
+    logic [15:0] seq1;
+    logic [15:0] seq2;
+
+    logic [47:0] time0;
+    logic [47:0] time1;
+    logic [47:0] time2;
+
+    logic [31:0] power0;
+    logic [31:0] power1;
+    logic [31:0] power2;
+    logic [31:0] meta_rb;
+logic [31:0] time_rb;
+logic [31:0] valid_rb;
+
+    int drain_guard;
+
+    test.start_test(
+        "Measurement FIFO FWFT + explicit POP",
+        5ms
+    );
+
+    //-------------------------------------------------------
+    // Configure block
+    //-------------------------------------------------------
+
+    write_reg(port_out, REG_ENABLE, 0);
+    flush_output(port_out);
+
+    write_reg(
+        port_out,
+        REG_SPP,
+        64
+    );
+
+    write_reg(
+        port_out,
+        REG_GAIN,
+        16'h7FFF
+    );
+
+    write_reg(
+        port_out,
+        REG_PHASE_INC,
+        16'd64
+    );
+
+    write_reg(
+        port_out,
+        REG_CARTESIAN,
+        {16'sh7FFF, 16'sh0000}
+    );
+
+    write_reg(
+        port_out,
+        REG_THRESHOLD,
+        16'd500
+    );
+
+    write_reg(
+        port_out,
+        REG_AVG_START_DELAY,
+        0
+    );
+
+    write_reg(
+        port_out,
+        REG_PULSEWIDTH,
+        16
+    );
+
+    write_reg(
+        port_out,
+        REG_DELAY,
+        0
+    );
+
+    write_reg(
+        port_out,
+        REG_PULSE_GAP,
+        20
+    );
+
+
+    //-------------------------------------------------------
+    // Drain FIFO entries left by previous tests
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    $display(
+        "FIFO count before drain = %0d",
+        count_rb
+    );
+
+    drain_guard = 0;
+
+    while ((count_rb != 0) &&
+           (drain_guard < 2048))
+    begin
+
+        // META does not pop
+        read_reg(
+            port_out,
+            REG_MEAS_FIFO_META,
+            meta_rb
+        );
+
+        // TIME_LO does not pop
+        read_reg(
+            port_out,
+            REG_MEAS_FIFO_TIME_LO,
+            lo_rb
+        );
+
+        // AVG_POWER is read-only: does NOT pop the entry
+        read_reg(
+            port_out,
+            REG_MEAS_FIFO_AVG_POWER,
+            power_rb
+        );
+
+        // Reading all fields must not advance the FWFT FIFO.
+        // Explicit POP: advance FIFO by exactly one entry.
+        write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+
+        /*
+         * Give the CE-clock FIFO controller time
+         * to observe meas_fifo_pop_req.
+         */
+        #(CE_CLK_PER * 8);
+
+        read_reg(
+            port_out,
+            REG_MEAS_FIFO_COUNT,
+            count_rb
+        );
+
+        drain_guard++;
+    end
+
+
+    `ASSERT_ERROR(
+        drain_guard < 2048,
+        "Timeout while draining measurement FIFO"
+    );
+
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    $display(
+        "FIFO count after drain = %0d",
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 0,
+        "Measurement FIFO should be empty after drain"
+    );
+
+
+    //-------------------------------------------------------
+    // Enable trigger operation
+    //-------------------------------------------------------
+
+    write_reg(
+        port_out,
+        REG_ENABLE,
+        1
+    );
+
+
+    //-------------------------------------------------------
+    // Trigger #1
+    //
+    // Amplitude = 4000 counts
+    // Expected average power ~= 4000^2 = 16,000,000
+    //-------------------------------------------------------
+
+    tx.delete();
+
+    repeat (64)
+        tx.push_back(
+            pack_iq(
+                16'sd200,
+                16'sd0
+            )
+        );
+
+    repeat (200)
+        tx.push_back(
+            pack_iq(
+                16'sd4000,
+                16'sd0
+            )
+        );
+
+    repeat (300)
+        tx.push_back(
+            pack_iq(
+                16'sd200,
+                16'sd0
+            )
+        );
+
+    blk_ctrl.send_items(
+        port_in,
+        tx
+    );
+
+    #(CE_CLK_PER * 3000);
+
+
+    //-------------------------------------------------------
+    // Trigger #2
+    //
+    // Use a different amplitude so we can verify that
+    // each FIFO entry keeps its own power measurement.
+    //
+    // Amplitude = 3000
+    // Expected power ~= 9,000,000
+    //-------------------------------------------------------
+
+    tx.delete();
+
+    repeat (64)
+        tx.push_back(
+            pack_iq(
+                16'sd200,
+                16'sd0
+            )
+        );
+
+    repeat (200)
+        tx.push_back(
+            pack_iq(
+                16'sd3000,
+                16'sd0
+            )
+        );
+
+    repeat (300)
+        tx.push_back(
+            pack_iq(
+                16'sd200,
+                16'sd0
+            )
+        );
+
+    blk_ctrl.send_items(
+        port_in,
+        tx
+    );
+
+    #(CE_CLK_PER * 3000);
+
+
+    //-------------------------------------------------------
+    // Trigger #3
+    //
+    // Amplitude = 2000
+    // Expected power ~= 4,000,000
+    //-------------------------------------------------------
+
+    tx.delete();
+
+    repeat (64)
+        tx.push_back(
+            pack_iq(
+                16'sd200,
+                16'sd0
+            )
+        );
+
+    repeat (200)
+        tx.push_back(
+            pack_iq(
+                16'sd2000,
+                16'sd0
+            )
+        );
+
+    repeat (300)
+        tx.push_back(
+            pack_iq(
+                16'sd200,
+                16'sd0
+            )
+        );
+
+    blk_ctrl.send_items(
+        port_in,
+        tx
+    );
+
+    #(CE_CLK_PER * 3000);
+    
+    // -----------------------------------------
+// NEW: CtrlPort verification
+// -----------------------------------------
+
+read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+`ASSERT_ERROR(count_rb == 3, "Expected 3 FIFO entries");
+
+read_reg(port_out, REG_MEAS_FIFO_VALID, valid_rb);
+`ASSERT_ERROR(valid_rb[0] == 1'b1, "FIFO should be valid");
+
+read_reg(port_out, REG_MEAS_FIFO_META, meta_rb);
+read_reg(port_out, REG_MEAS_FIFO_TIME_LO, lo_rb);
+read_reg(port_out, REG_MEAS_FIFO_AVG_POWER, power_rb);
+
+$display("CTRL META  = 0x%08h", meta_rb);
+$display("CTRL TIME  = 0x%08h", lo_rb);
+$display("CTRL POWER = %0d", power_rb);
+
+// Reading must NOT remove the measurement
+read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+`ASSERT_ERROR(count_rb == 3, "CtrlPort read popped FIFO");
+
+
+
+    //-------------------------------------------------------
+    // Verify exactly 3 measurements were pushed
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    $display(
+        "FIFO count after 3 triggers = %0d",
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 3,
+        "FIFO should contain exactly 3 measurements"
+    );
+
+
+    //-------------------------------------------------------
+    // Read FIFO entry #0
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_META,
+        meta_rb
+    );
+
+    //-------------------------------------------------------
+    // META must NOT pop
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 3,
+        "Reading FIFO META must not pop an entry"
+    );
+
+
+    //-------------------------------------------------------
+    // Read timestamp low
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_TIME_LO,
+        lo_rb
+    );
+
+    //-------------------------------------------------------
+    // TIME_LO must NOT pop either
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 3,
+        "Reading FIFO TIME_LO must not pop an entry"
+    );
+
+
+    seq0 =
+        meta_rb[31:16];
+
+    time0 = {
+        meta_rb[15:0],
+        lo_rb
+    };
+
+
+    //-------------------------------------------------------
+    // Read power.
+    // Reading AVG_POWER does NOT pop the FIFO entry.
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_AVG_POWER,
+        power_rb
+    );
+
+        // Reading all fields must not advance the FWFT FIFO.
+        read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+        `ASSERT_ERROR(count_rb == 3,
+            "Reading AVG_POWER must not pop entry #0");
+        // Explicit POP: advance FIFO by exactly one entry.
+        write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+
+    power0 = power_rb;
+
+    #(CE_CLK_PER * 8);
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    $display(
+        "FIFO[0]: SEQ=%0d TIME=%0d POWER=%0d COUNT=%0d",
+        seq0,
+        time0,
+        power0,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 2,
+        "FIFO count should be 2 after first explicit POP"
+    );
+
+    `ASSERT_ERROR(
+        power0 != 0,
+        "FIFO[0] average power should not be zero"
+    );
+
+
+    //-------------------------------------------------------
+    // Read FIFO entry #1
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_META,
+        meta_rb
+    );
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_TIME_LO,
+        lo_rb
+    );
+
+    seq1 =
+        meta_rb[31:16];
+
+    time1 = {
+        meta_rb[15:0],
+        lo_rb
+    };
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_AVG_POWER,
+        power_rb
+    );
+
+        // Reading all fields must not advance the FWFT FIFO.
+        read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+        `ASSERT_ERROR(count_rb == 2,
+            "Reading AVG_POWER must not pop entry #1");
+        // Explicit POP: advance FIFO by exactly one entry.
+        write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+
+    power1 = power_rb;
+
+    #(CE_CLK_PER * 8);
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    $display(
+        "FIFO[1]: SEQ=%0d TIME=%0d POWER=%0d COUNT=%0d",
+        seq1,
+        time1,
+        power1,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 1,
+        "FIFO count should be 1 after second pop"
+    );
+
+    `ASSERT_ERROR(
+        power1 != 0,
+        "FIFO[1] average power should not be zero"
+    );
+
+
+    //-------------------------------------------------------
+    // Read FIFO entry #2
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_META,
+        meta_rb
+    );
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_TIME_LO,
+        lo_rb
+    );
+
+    seq2 =
+        meta_rb[31:16];
+
+    time2 = {
+        meta_rb[15:0],
+        lo_rb
+    };
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_AVG_POWER,
+        power_rb
+    );
+
+        // Reading all fields must not advance the FWFT FIFO.
+        read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+        `ASSERT_ERROR(count_rb == 1,
+            "Reading AVG_POWER must not pop entry #2");
+        // Explicit POP: advance FIFO by exactly one entry.
+        write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+
+    power2 = power_rb;
+
+    #(CE_CLK_PER * 8);
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    $display(
+        "FIFO[2]: SEQ=%0d TIME=%0d POWER=%0d COUNT=%0d",
+        seq2,
+        time2,
+        power2,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 0,
+        "FIFO should be empty after third pop"
+    );
+
+    `ASSERT_ERROR(
+        power2 != 0,
+        "FIFO[2] average power should not be zero"
+    );
+
+
+    //-------------------------------------------------------
+    // Verify sequence ordering
+    //-------------------------------------------------------
+
+    $display(
+        "FIFO sequences: %0d, %0d, %0d",
+        seq0,
+        seq1,
+        seq2
+    );
+
+    `ASSERT_ERROR(
+        seq1 == (seq0 + 16'd1),
+        "FIFO sequence #1 is not consecutive"
+    );
+
+    `ASSERT_ERROR(
+        seq2 == (seq1 + 16'd1),
+        "FIFO sequence #2 is not consecutive"
+    );
+
+
+    //-------------------------------------------------------
+    // Verify timestamp ordering
+    //-------------------------------------------------------
+
+    $display(
+        "FIFO timestamps: %0d, %0d, %0d",
+        time0,
+        time1,
+        time2
+    );
+
+    `ASSERT_ERROR(
+        time1 > time0,
+        "Second FIFO timestamp must be greater than first"
+    );
+
+    `ASSERT_ERROR(
+        time2 > time1,
+        "Third FIFO timestamp must be greater than second"
+    );
+
+
+    //-------------------------------------------------------
+    // Verify amplitude/power ordering
+    //
+    // Inputs were:
+    //
+    // #0 = 4000
+    // #1 = 3000
+    // #2 = 2000
+    //
+    // Therefore:
+    //
+    // power0 > power1 > power2
+    //-------------------------------------------------------
+
+    $display(
+        "FIFO powers: %0d, %0d, %0d",
+        power0,
+        power1,
+        power2
+    );
+
+    `ASSERT_ERROR(
+        power0 > power1,
+        "FIFO power #0 should be greater than power #1"
+    );
+
+    `ASSERT_ERROR(
+        power1 > power2,
+        "FIFO power #1 should be greater than power #2"
+    );
+
+
+    //-------------------------------------------------------
+    // Optional stronger sanity checks
+    //
+    // With Q=0 and constant I during the averaging window:
+    //
+    //   4000^2 = 16,000,000
+    //   3000^2 =  9,000,000
+    //   2000^2 =  4,000,000
+    //
+    // Don't require exact equality here yet because the
+    // exact averaging-window alignment can include edge
+    // samples depending on your AVG_START_DELAY.
+    //-------------------------------------------------------
+
+    `ASSERT_ERROR(
+        power0 > 32'd12000000,
+        "FIFO[0] power unexpectedly low"
+    );
+
+    `ASSERT_ERROR(
+        power1 > 32'd6000000,
+        "FIFO[1] power unexpectedly low"
+    );
+
+    `ASSERT_ERROR(
+        power2 > 32'd2000000,
+        "FIFO[2] power unexpectedly low"
+    );
+
+
+    //-------------------------------------------------------
+    // Verify empty FIFO reads
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_META,
+        meta_rb
+    );
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_TIME_LO,
+        lo_rb
+    );
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_AVG_POWER,
+        power_rb
+    );
+
+    #(CE_CLK_PER * 8);
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_COUNT,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb == 0,
+        "Empty FIFO read must not decrement count"
+    );
+
+    `ASSERT_ERROR(
+        meta_rb == 0,
+        "Empty FIFO META should return zero"
+    );
+
+    `ASSERT_ERROR(
+        lo_rb == 0,
+        "Empty FIFO TIME_LO should return zero"
+    );
+
+    `ASSERT_ERROR(
+        power_rb == 0,
+        "Empty FIFO AVG_POWER should return zero"
+    );
+
+
+    // Explicit POP while empty must not underflow.
+    write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+    #(CE_CLK_PER * 8);
+    read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+    `ASSERT_ERROR(count_rb == 0,
+        "POP on empty FIFO must not decrement count");
+
+    //-------------------------------------------------------
+    // Check overflow stayed clear
+    //-------------------------------------------------------
+
+    read_reg(
+        port_out,
+        REG_MEAS_FIFO_OVERFLOW,
+        count_rb
+    );
+
+    `ASSERT_ERROR(
+        count_rb[0] == 1'b0,
+        "FIFO overflow unexpectedly asserted"
+    );
+
+
+    //-------------------------------------------------------
+    // Cleanup
+    //-------------------------------------------------------
+
+    write_reg(
+        port_out,
+        REG_ENABLE,
+        0
+    );
+
+    flush_output(port_out);
+
+    test.end_test();
+
+endtask
 
   //---------------------------------------------------------------------------
   // Main Test Process
@@ -950,6 +1891,10 @@ endtask
     // NEW input-trigger tests
     test_no_trigger_no_output(0, 0);
     test_trigger_delay_burst_len(0, 0);
+    test_measurement_fifo(0, 0);
+
+    test_pulse_timestamp(0, 0);
+    // NEW
     // Measure the pipeline latency for port 0
     measure_pipeline_latency(0);
 

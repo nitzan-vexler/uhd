@@ -12,7 +12,7 @@
 // Address space size, per signal generator core. That is, each signal
 // generator core's address space is separated in the CtrlPort address space
 // by 2^SIGGEN_ADDR_W bytes.
-localparam SIGGEN_ADDR_W = 6;
+localparam SIGGEN_ADDR_W = 7;
 
 
 
@@ -162,3 +162,42 @@ localparam        REG_DBG_TX_AMP_LEN = 16;
 // 0x34: gap between fixed and relative pulses, in ce_clk cycles
 localparam [19:0] REG_PULSE_GAP = 20'h00034;
 localparam        REG_PULSE_GAP_LEN = 32;
+
+// 0x38:
+// [31:16] Sequence number
+// [15:0]  Pulse sample index [47:32]
+localparam [19:0] REG_PULSE_TIME_META = 20'h00038;
+localparam        REG_PULSE_TIME_META_LEN = 32;
+
+// 0x3C:
+// Pulse sample index [31:0]
+localparam [19:0] REG_PULSE_TIME_LO = 20'h0003C;
+localparam        REG_PULSE_TIME_LO_LEN = 32;
+
+// 0x40: Number of stored measurements
+localparam [19:0] REG_MEAS_FIFO_COUNT     = 20'h00040;
+
+// 0x44:
+// [31:16] Sequence number
+// [15:0]  Timestamp [47:32]
+localparam [19:0] REG_MEAS_FIFO_META      = 20'h00044;
+
+// 0x48:
+// Timestamp [31:0]
+localparam [19:0] REG_MEAS_FIFO_TIME_LO   = 20'h00048;
+
+// 0x4C:
+// [0] FIFO overflow
+localparam [19:0] REG_MEAS_FIFO_OVERFLOW  = 20'h0004C;
+
+// 0x50:
+// Average power of the 128 samples
+localparam [19:0] REG_MEAS_FIFO_AVG_POWER = 20'h00050;
+
+// 0x54:
+// [0] 1 = meas_read_data contains a valid prefetched measurement
+localparam [19:0] REG_MEAS_FIFO_VALID     = 20'h00054;
+
+// 0x58:
+// Write 1 to bit 0 to remove the current measurement
+localparam [19:0] REG_MEAS_FIFO_POP       = 20'h00058;

@@ -19,7 +19,7 @@
 using namespace uhd::rfnoc;
 
 
-const uint32_t siggen_block_control::REG_BLOCK_SIZE       = 1 << 6;
+const uint32_t siggen_block_control::REG_BLOCK_SIZE       = 1 << 7;
 const uint32_t siggen_block_control::REG_ENABLE_OFFSET    = 0x00;
 const uint32_t siggen_block_control::REG_SPP_OFFSET       = 0x04;
 const uint32_t siggen_block_control::REG_WAVEFORM_OFFSET  = 0x08;
@@ -34,9 +34,30 @@ const uint32_t siggen_block_control::REG_AVG_START_DELAY_OFFSET   = 0x28;
 const uint32_t siggen_block_control::REG_DBG_AVG_POWER_OFFSET = 0x2C;
 const uint32_t siggen_block_control::REG_DBG_TX_AMP_OFFSET = 0x30;
 const uint32_t siggen_block_control::REG_PULSE_GAP_OFFSET = 0x34;
+const uint32_t
+    siggen_block_control::REG_PULSE_TIME_META_OFFSET = 0x38;
 
+const uint32_t
+    siggen_block_control::REG_PULSE_TIME_LO_OFFSET = 0x3C;
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_COUNT_OFFSET = 0x40;
 
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_META_OFFSET = 0x44;
 
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_TIME_LO_OFFSET = 0x48;
+
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_OVERFLOW_OFFSET = 0x4C;
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_AVG_POWER_OFFSET = 0x50;
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_VALID_OFFSET = 0x54;
+
+const uint32_t
+    siggen_block_control::REG_MEAS_FIFO_POP_OFFSET = 0x58;
+    
 // User property names
 const char* const PROP_KEY_ENABLE         = "enable";
 const char* const PROP_KEY_WAVEFORM       = "waveform";
@@ -200,7 +221,125 @@ uint32_t get_tx_amp(const size_t port = 0) override
     return _siggen_reg_iface.peek32(REG_DBG_TX_AMP_OFFSET, port);
 }
 
+uint32_t get_measurement_fifo_count(
+    const size_t port = 0) override
+{
+    return _siggen_reg_iface.peek32(
+        REG_MEAS_FIFO_COUNT_OFFSET,
+        port);
+}
 
+bool get_measurement_fifo_overflow(
+    const size_t port = 0) override
+{
+    const uint32_t value =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_OVERFLOW_OFFSET,
+            port);
+
+    return (value & 0x1) != 0;
+}
+bool pop_measurement_fifo(
+    pulse_info& result,
+    const size_t port = 0) override
+{
+    // Is there anything stored?
+    const uint32_t count =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_COUNT_OFFSET,
+            port);
+
+    if (count == 0) {
+        return false;
+    }
+
+    // Check that the BRAM read/prefetch has completed.
+    const uint32_t valid =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_VALID_OFFSET,
+            port);
+
+    if ((valid & 0x1) == 0) {
+        return false;
+    }
+
+    // Read the current prefetched measurement.
+    const uint32_t meta =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_META_OFFSET,
+            port);
+
+    const uint32_t time_lo =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_TIME_LO_OFFSET,
+            port);
+
+    const uint32_t avg_power =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_AVG_POWER_OFFSET,
+            port);
+
+    // Reconstruct measurement.
+    result.sequence =
+        static_cast<uint16_t>(meta >> 16);
+
+    result.sample_index =
+        (uint64_t(meta & 0xFFFF) << 32)
+        | uint64_t(time_lo);
+
+    result.avg_power = avg_power;
+
+    // Explicitly remove this entry from the FIFO.
+    _siggen_reg_iface.poke32(
+        REG_MEAS_FIFO_POP_OFFSET,
+        1,
+        port);
+
+    return true;
+}
+
+bool get_latest_pulse_measurement(
+    pulse_info& result,
+    const size_t port = 0) override
+{
+    for (int retry = 0; retry < 16; ++retry)
+    {
+        const uint32_t meta1 =
+            _siggen_reg_iface.peek32(
+                REG_PULSE_TIME_META_OFFSET,
+                port);
+
+        const uint32_t sample_lo =
+            _siggen_reg_iface.peek32(
+                REG_PULSE_TIME_LO_OFFSET,
+                port);
+
+        const uint32_t meta2 =
+            _siggen_reg_iface.peek32(
+                REG_PULSE_TIME_META_OFFSET,
+                port);
+
+        const uint16_t seq1 =
+            static_cast<uint16_t>(meta1 >> 16);
+
+        const uint16_t seq2 =
+            static_cast<uint16_t>(meta2 >> 16);
+
+        if (seq1 != seq2) {
+            continue;
+        }
+
+        result.sequence = seq2;
+
+        result.sample_index =
+            (uint64_t(meta2 & 0xFFFF) << 32)
+            | uint64_t(sample_lo);
+
+        return true;
+    }
+
+    return false;
+}
 
     /**************************************************************************
      * Initialization

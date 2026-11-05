@@ -1,10 +1,10 @@
 import struct
 import csv
 import os
+import argparse
 from datetime import datetime, timedelta
 
 # Configuration
-BINARY_FILE = "usrp_samples.dat"  # Binary file name
 OUTPUT_FOLDER = "csv_output"  # Folder for CSV files
 TIMESTAMP_SIZE = 8  # int64_t (8 bytes)
 GPS_TIME_SIZE = 20  # Fixed-size GPS time string (20 bytes)
@@ -30,7 +30,7 @@ def read_samples_binary_to_csv(binary_file, output_folder, rows_per_file):
         writer = csv.writer(csv_file)
         writer.writerow([
             "System Time (µs)", "Parsed System Time (UTC+2)", "GPS Time",
-            "Time Diff (µs)", "Latitude", "Longitude", "Altitude", "Amplitude (dBm)"
+            "Time Diff (µs)", "Latitude", "Longitude", "Altitude", "Amplitude (dBFS)"
         ])
 
         while True:
@@ -104,7 +104,7 @@ def read_samples_binary_to_csv(binary_file, output_folder, rows_per_file):
                 writer = csv.writer(csv_file)
                 writer.writerow([
                     "System Time (µs)", "Parsed System Time (UTC+2)", "GPS Time",
-                    "Time Diff (µs)", "Latitude", "Longitude", "Altitude", "Amplitude (dBm)"
+                    "Time Diff (µs)", "Latitude", "Longitude", "Altitude", "Amplitude (dBFS)"
                 ])
 
         # Close last file
@@ -113,5 +113,27 @@ def read_samples_binary_to_csv(binary_file, output_folder, rows_per_file):
     print(f"Conversion complete! {file_index} CSV files saved in '{output_folder}'.")
 
 if __name__ == "__main__":
-    read_samples_binary_to_csv(BINARY_FILE, OUTPUT_FOLDER, ROWS_PER_FILE)
+    parser = argparse.ArgumentParser(
+        description="Convert 60-byte RFNoC trigger measurement records to CSV."
+    )
+    parser.add_argument(
+        "--input",
+        required=True,
+        help="Input binary measurement file (for example measurements.dat)",
+    )
+    parser.add_argument(
+        "--output-folder",
+        default=OUTPUT_FOLDER,
+        help=f"Output directory for CSV files (default: {OUTPUT_FOLDER})",
+    )
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.input):
+        parser.error(f"Input file does not exist: {args.input}")
+
+    read_samples_binary_to_csv(
+        args.input,
+        args.output_folder,
+        ROWS_PER_FILE,
+    )
 
