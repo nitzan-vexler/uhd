@@ -273,7 +273,10 @@ wire axis_data_clk_s, axis_data_rst_s;
         .m_tlast              (s_out_axis_tlast   [port* 1 +:  1]),
         .m_tvalid             (s_out_axis_tvalid  [port* 1 +:  1]),
         .m_tready             (s_out_axis_tready  [port* 1 +:  1]),
-        .m_tlength            (s_out_axis_tlength [port*16 +: 16])
+        .m_tlength            (s_out_axis_tlength [port*16 +: 16]),
+          // timestamp addition 
+        .s_ttimestamp (s_in_axis_ttimestamp[port*64 +: 64]),
+        .s_thas_time (s_in_axis_thas_time[port])
       );
 
     end

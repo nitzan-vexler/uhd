@@ -1,1936 +1,742 @@
 #!/usr/bin/env python3
-
+"""Combined Mode + binary measurement parser GUI for UHD RFNoC SigGen."""
 import os
+import json
+import queue
+import re
+import shlex
 import signal
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import re
-import time
 from collections import deque
-import shlex
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import math
-import sys
+from combined_parser import convert
 
-APP_PULSE = "./rfnoc_radio_loopback"
-APP_CW = os.path.expanduser("~/workarea/uhd/work/cw.py")
-APP_RX = "./rfnoc_rx_to_file_host"
-APP_CONVERT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parser.py")
-WORKDIR = os.path.expanduser("~/workarea/uhd/work/build")
-REMOTE_PULSE_DIR = "/home/work/fixed_power"
-REMOTE_PULSE_APP = "./rfnoc_radio_loopback"
-REMOTE_UHD_LIB_DIR = "/home/root/app/uhd_lib"
-REMOTE_PULSE_PID_FILE = "/tmp/rfnoc_gui_pulse.pid"
-REMOTE_CW_DIR = "/home/work/CW"
-REMOTE_CW_APP = "cw.py"
-REMOTE_CW_PID_FILE = "/tmp/rfnoc_gui_cw.pid"
-REMOTE_RX_DIR = "/home/work/pulse_to_file"
-REMOTE_RX_APP = "./rfnoc_rx_to_file_custom"
-REMOTE_RX_FILE = f"{REMOTE_RX_DIR}/usrp_samples.dat"
-REMOTE_MEAS_FILE = f"{REMOTE_PULSE_DIR}/measurements.dat"
-REMOTE_RX_PID_FILE = "/tmp/rfnoc_gui_rx.pid"
-proc = None
+WORKDIR = os.path.expanduser('~/workarea/uhd/work/build')
+HOST_APP = './rfnoc_radio_loopback'
+REMOTE_DIR = '/home/work/fixed_power'
+REMOTE_APP = './rfnoc_radio_loopback'
+REMOTE_LIB = '/home/root/app/uhd_lib'
+REMOTE_PID = '/tmp/rfnoc_gui_pulse.pid'
+REMOTE_FILE = REMOTE_DIR + '/measurements.dat'
 
-tx_time = deque(maxlen=200)
-rx_dbfs_values = deque(maxlen=200)
-tx_dbfs_values = deque(maxlen=200)
-start_time = None
-threshold_dbfs = None
+class CombinedGUI:
+    def __init__(self, root):
+        self.root = root
+        root.title('RFNoC — Combined Mode & Measurement Parser')
+        root.geometry('1360x900')
+        root.minsize(1050, 680)
+        self.bg = '#0b1220'
+        self.surface = '#131f31'
+        self.field = '#1b2a40'
+        self.fg = '#eaf1fa'
+        self.muted = '#9cb0c8'
+        self.accent = '#4bb8ff'
+        root.configure(bg=self.bg)
+        style = ttk.Style(root)
+        style.theme_use('clam')
+        style.configure('.', font=('DejaVu Sans', 10), background=self.bg, foreground=self.fg)
+        style.configure('TFrame', background=self.bg)
+        style.configure('Metric.TFrame',background=self.surface)
+        style.configure('MetricName.TLabel',background=self.surface,foreground=self.muted,font=('DejaVu Sans',9,'bold'))
+        style.configure('MetricValue.TLabel',background=self.surface,foreground=self.accent,font=('DejaVu Sans',17,'bold'))
+        style.configure('Card.TLabelframe', background=self.surface, bordercolor='#293c55',
+                        relief='solid', borderwidth=1)
+        style.configure('Card.TLabelframe.Label', background=self.surface,
+                        foreground=self.accent, font=('DejaVu Sans', 10, 'bold'))
+        style.configure('Card.TLabel', background=self.surface, foreground=self.fg)
+        style.configure('Muted.TLabel', background=self.surface, foreground=self.muted)
+        style.configure('Hero.TLabel', background=self.bg, foreground=self.fg,
+                        font=('DejaVu Sans', 19, 'bold'))
+        style.configure('Subtitle.TLabel', background=self.bg, foreground=self.muted)
+        style.configure('TEntry', fieldbackground=self.field, foreground=self.fg,
+                        insertcolor=self.fg, bordercolor='#344962', padding=6)
+        style.configure('TCombobox', fieldbackground=self.field, foreground=self.fg,
+                        background=self.field, arrowcolor=self.accent, padding=5)
+        style.map('TCombobox', fieldbackground=[('readonly', self.field)],
+                  foreground=[('readonly', self.fg)])
+        style.configure('TCheckbutton', background=self.surface, foreground=self.fg)
+        style.map('TCheckbutton', background=[('active', self.surface)])
+        style.configure('TButton', background='#263a55', foreground=self.fg,
+                        padding=(12, 8), borderwidth=0, font=('DejaVu Sans', 10, 'bold'))
+        style.map('TButton', background=[('active', '#365477')])
+        style.configure('Accent.TButton', background='#1684d8', foreground='#ffffff')
+        style.map('Accent.TButton', background=[('active', '#319eec')])
+        style.configure('Danger.TButton', background='#82364c', foreground='#ffffff')
+        style.map('Danger.TButton', background=[('active', '#a64b63')])
+        style.configure('TNotebook', background=self.bg, borderwidth=0)
+        style.configure('TNotebook.Tab', background=self.surface, foreground=self.muted,
+                        padding=(20, 11), font=('DejaVu Sans', 10, 'bold'))
+        style.map('TNotebook.Tab', background=[('selected', '#234c70')],
+                  foreground=[('selected', '#ffffff')])
+        root.option_add('*TCombobox*Listbox.background', self.field)
+        root.option_add('*TCombobox*Listbox.foreground', self.fg)
+        self.proc = None
+        self.run_target = None
+        self.messages = queue.Queue()
+        self.x = deque(maxlen=250)
+        self.y = deque(maxlen=250)
+        self.pulse_count = 0
+        self.metric_vars = {}
+        self.last_seq = None
+        self.gps_state = 'WAITING'
+        self.gps_test_state = 'CHECKING'
+        self._gps_check_running = False
+        self._gps_check_generation = 0
+        self.sync_test_state = 'Disconnected'
+        self.session_state = 'IDLE'
+        self.v = {}
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+        header = ttk.Frame(root, padding=(22, 17, 22, 8))
+        header.grid(row=0, column=0, sticky='ew')
+        ttk.Label(header, text='RFNoC  /  CONTROL CENTER', style='Hero.TLabel').pack(anchor='w')
+        ttk.Label(header, text='Combined Mode · Pulse detection, retransmission & GPS measurements',
+                  style='Subtitle.TLabel').pack(anchor='w', pady=(4, 0))
+        root.rowconfigure(0, weight=0)
+        root.rowconfigure(1, weight=1)
+        self.tabs = ttk.Notebook(root)
+        self.tabs.grid(row=1, column=0, sticky='nsew', padx=14, pady=(4, 14))
+        combined = ttk.Frame(self.tabs, padding=8)
+        parser = ttk.Frame(self.tabs, padding=14)
+        self.tabs.add(combined, text='Combined Mode')
+        self.tabs.add(parser, text='Measurement Parser')
+        combined.columnconfigure(1, weight=1)
+        combined.rowconfigure(0, weight=1)
+        left_outer = ttk.Frame(combined)
+        left_outer.grid(row=0, column=0, sticky='ns', padx=(0, 10))
+        left_canvas = tk.Canvas(left_outer, width=435, highlightthickness=0, bg=self.bg)
+        scrollbar = ttk.Scrollbar(left_outer, orient='vertical', command=left_canvas.yview)
+        left_canvas.configure(yscrollcommand=scrollbar.set)
+        left_canvas.pack(side='left', fill='y', expand=True)
+        scrollbar.pack(side='right', fill='y')
+        left = ttk.Frame(left_canvas, padding=5)
+        window = left_canvas.create_window((0,0), window=left, anchor='nw')
+        left.bind('<Configure>', lambda e: left_canvas.configure(scrollregion=left_canvas.bbox('all')))
+        left_canvas.bind('<Configure>', lambda e: left_canvas.itemconfigure(window, width=e.width))
+        def group(title):
+            f = ttk.LabelFrame(left, text=title, padding=12, style='Card.TLabelframe')
+            f.pack(fill='x', pady=4)
+            f.columnconfigure(1, weight=1)
+            return f
+        # A predictable row index per group (avoids fragile widget-count arithmetic).
+        def fields(f, specs):
+            for r,(label,key,default) in enumerate(specs):
+                ttk.Label(f,text=label,style='Card.TLabel').grid(row=r,column=0,sticky='w',padx=4,pady=3)
+                self.v[key]=tk.StringVar(value=str(default))
+                ttk.Entry(f,textvariable=self.v[key],width=22).grid(row=r,column=1,sticky='ew',padx=4,pady=3)
+        f=group('Execution')
+        ttk.Label(f,text='Target',style='Card.TLabel').grid(row=0,column=0,sticky='w')
+        self.target=tk.StringVar(value='Host PC')
+        ttk.Combobox(f,textvariable=self.target,values=['Host PC','USRP E312'],state='readonly').grid(row=0,column=1,sticky='ew')
+        self.target.trace_add('write',lambda *_: self.toggle_remote())
+        f=group('RX Parameters')
+        fields(f,[('RX frequency [MHz]','rx_freq','200'),('RX gain [dB]','rx_gain','10'),('RX BW [MHz]','rx_bw','1'),('Threshold [dBFS]','threshold','-30')])
+        f=group('TX Parameters')
+        fields(f,[('TX frequency [MHz]','tx_freq','200'),('TX gain [dB]','tx_gain','70'),('TX BW [MHz]','tx_bw','1')])
+        f=group('Sampling')
+        fields(f,[('Rate [MSPS]','rate','60'),('Samples per packet','spp','64')])
+        f=group('Pulse Parameters')
+        fields(f,[('Avg start delay [samples]','avg_delay','32'),('Delay [us]','delay','100'),('Pulse width [us]','pw','10'),('Pulse gap [us]','gap','100')])
+        f=group('Measurement Recording')
+        self.save=tk.BooleanVar(value=True); self.gps=tk.BooleanVar(value=True)
+        ttk.Checkbutton(f,text='Save measurements',variable=self.save).grid(row=0,column=0,columnspan=2,sticky='w')
+        ttk.Checkbutton(f,text='GPSD + GPS/PPS UTC sync (--gps)',variable=self.gps).grid(row=1,column=0,columnspan=2,sticky='w')
+        self.v['output']=tk.StringVar(value=os.path.join(WORKDIR,'combined_measurements.dat'))
+        ttk.Entry(f,textvariable=self.v['output']).grid(row=2,column=0,columnspan=2,sticky='ew')
+        ttk.Button(f,text='Choose file',command=lambda:self.pick_save(self.v['output'])).grid(row=3,column=0)
+        ttk.Button(f,text='Download E312 file',command=self.download).grid(row=3,column=1)
+        f=group('Controls')
+        for c,(label,cmd) in enumerate([('Start',self.start),('Stop',self.stop),('Clear Log',self.clear)]):
+            ttk.Button(f,text=label,command=cmd,style=('Accent.TButton' if label=='Start' else 'Danger.TButton' if label=='Stop' else 'TButton')).grid(row=0,column=c,padx=3,sticky='ew')
+            f.columnconfigure(c,weight=1)
+        right=ttk.Frame(combined)
+        right.grid(row=0,column=1,sticky='nsew')
+        right.columnconfigure(0,weight=1)
+        right.columnconfigure(1,weight=0)
+        right.rowconfigure(2,weight=1)
+        dashboard=ttk.Frame(right, padding=(0,0,0,10))
+        dashboard.grid(row=0,column=0,sticky='ew')
+        for c in range(3): dashboard.columnconfigure(c,weight=1)
+        sidebar=ttk.Frame(right, width=390)
+        sidebar.grid(row=0, column=1, rowspan=3, sticky='ns', padx=(10, 0))
+        sidebar.columnconfigure(0,weight=1)
+        for i,(key,title,initial) in enumerate([
+            ('state','ACQUISITION','IDLE'),
+            ('freq','RX FREQUENCY','200 MHz'),
+            ('power','RX POWER','— dBFS'),
+            ('pri','PULSE PRI','— µs'),
+            ('count','PULSES','0'),
+            ('gps','GPS FIX','WAITING'),
+        ]):
+            tile=ttk.Frame(dashboard,style='Metric.TFrame',padding=(14,12))
+            tile.grid(row=i//3,column=i%3,sticky='nsew',padx=4,pady=4)
+            ttk.Label(tile,text=title,style='MetricName.TLabel').pack(anchor='w')
+            var=tk.StringVar(value=initial)
+            ttk.Label(tile,textvariable=var,style='MetricValue.TLabel').pack(anchor='w',pady=(5,0))
+            self.metric_vars[key]=var
 
 
+        # Compact live GPS telemetry row, populated only by actual GPSD/C++ data.
+        gps_details = ttk.Frame(dashboard)
+        gps_details.grid(row=2, column=0, columnspan=3, sticky='ew', pady=(2, 0))
+        for c in range(4):
+            gps_details.columnconfigure(c, weight=1)
+        for c, (key, title) in enumerate((
+            ('latitude', 'LATITUDE'), ('longitude', 'LONGITUDE'),
+            ('altitude', 'ALTITUDE'), ('gps_time', 'GPS UTC TIME')
+        )):
+            tile = ttk.Frame(gps_details, style='Metric.TFrame', padding=(10, 6))
+            tile.grid(row=0, column=c, sticky='ew', padx=4)
+            ttk.Label(tile, text=title, style='MetricName.TLabel').pack(anchor='w')
+            value = tk.StringVar(value='—')
+            ttk.Label(tile, textvariable=value, style='MetricName.TLabel',
+                      font=('DejaVu Sans', 11, 'bold')).pack(anchor='w', pady=(3, 0))
+            self.metric_vars[key] = value
 
-def update_plot_from_line(line):
-    global start_time
-    global threshold_dbfs
+        f=ttk.LabelFrame(sidebar, text='ANTENNA SELECTION / PORT STATUS', padding=10, style='Card.TLabelframe')
+        f.grid(row=0, column=0, sticky='ew', pady=(0, 8))
+        f.columnconfigure(1, weight=1)
+        self.rxport=tk.StringVar(value='RX2-A'); self.txport=tk.StringVar(value='TRX-A')
+        for r,(label,var,choices) in enumerate([('RX port',self.rxport,['TRX-A','RX2-A','TRX-B','RX2-B']),('TX port',self.txport,['TRX-A','TRX-B'])]):
+            ttk.Label(f,text=label,style='Card.TLabel').grid(row=r,column=0,sticky='w')
+            ttk.Combobox(f,textvariable=var,values=choices,state='readonly').grid(row=r,column=1,sticky='ew')
+        # Visual antenna port selection (configuration, not hardware link status).
+        ttk.Label(f, text='Selected antenna ports', style='Card.TLabel').grid(
+            row=2, column=0, columnspan=2, sticky='w', pady=(12, 4))
+        self.port_canvas = tk.Canvas(
+            f, height=164, bg=self.surface, highlightthickness=0, bd=0)
+        self.port_canvas.grid(row=3, column=0, columnspan=2, sticky='ew')
+        self.port_canvas.bind('<Configure>', lambda _event: self.update_port_leds())
+        self.rxport.trace_add('write', lambda *_: self.update_port_leds())
+        self.txport.trace_add('write', lambda *_: self.update_port_leds())
+        self.update_port_leds()
+        self.gps_test_label = tk.StringVar(value='GPS: CHECKING AUTOMATICALLY...')
+        ttk.Label(f, textvariable=self.gps_test_label, style='Card.TLabel').grid(
+            row=4, column=0, columnspan=2, sticky='w', pady=(5, 2))
+        ttk.Button(f, text='Test GPS Antenna (Mode 3)',
+                   command=self.test_gps_antenna).grid(
+            row=5, column=0, columnspan=2, sticky='ew', pady=(4, 2))
 
-    m_rx = re.search(r"RX_dBFS\s*=\s*(-?\d+(?:\.\d+)?)", line)
-    m_tx = re.search(r"TX_dBFS\s*=\s*(-?\d+(?:\.\d+)?)", line)
+        # Connection tools directly below antenna indicators, in both execution modes.
+        self.remote=ttk.LabelFrame(sidebar, text='USRP CONNECTION', padding=10, style='Card.TLabelframe')
+        self.remote.grid(row=1, column=0, sticky='ew', pady=(0, 8))
+        self.remote.columnconfigure(1, weight=1)
+        fields(self.remote,[('IP address','ip',''),('Username','user','root')])
+        ttk.Button(self.remote,text='Find USRP',command=self.find_usrp).grid(row=2,column=0,pady=5)
+        ttk.Button(self.remote,text='Test SSH',command=self.test_ssh).grid(row=2,column=1,pady=5)
+        self.usrp_connection_label = tk.StringVar(value='USRP: NOT CHECKED')
+        connection_status = ttk.Frame(self.remote)
+        connection_status.grid(row=3, column=0, columnspan=2, sticky='w', pady=(7, 2))
+        self.usrp_connection_led = tk.Canvas(connection_status, width=22, height=22,
+                                             bg=self.surface, highlightthickness=0)
+        self.usrp_connection_led.pack(side='left', padx=(0, 7))
+        self.usrp_connection_led_dot = self.usrp_connection_led.create_oval(
+            3, 3, 19, 19, fill='#657286', outline='')
+        ttk.Label(connection_status, textvariable=self.usrp_connection_label,
+                  style='Card.TLabel').pack(side='left')
+        self._usrp_check_running = False
+        self._usrp_check_generation = 0
+        self.v['ip'].trace_add('write', self._usrp_ip_changed)
+        self.v['user'].trace_add('write', self._gps_identity_changed)
 
-    if not (m_rx and m_tx):
-        return
+        # FPGA controls at the bottom of the right-hand stack.
+        fpga=ttk.LabelFrame(sidebar, text='FPGA', padding=10, style='Card.TLabelframe')
+        fpga.grid(row=2, column=0, sticky='ew')
+        fpga.columnconfigure(1, weight=1)
+        self.v['bitfile']=tk.StringVar(value='./e31x.bit')
+        ttk.Entry(fpga,textvariable=self.v['bitfile']).grid(row=0,column=0,columnspan=2,sticky='ew')
+        ttk.Button(fpga,text='Browse .bit',command=self.pick_bit).grid(row=1,column=0)
+        ttk.Button(fpga,text='Update FPGA',command=self.update_fpga).grid(row=1,column=1)
 
-    if start_time is None:
-        start_time = time.time()
+        plot_frame=ttk.LabelFrame(right,text='LIVE  /  RX AMPLITUDE',padding=12,style='Card.TLabelframe')
+        plot_frame.grid(row=1,column=0,sticky='ew')
+        self.fig=Figure(figsize=(6,2.1),dpi=100)
+        self.ax=self.fig.add_subplot(111)
+        self.fig.patch.set_facecolor(self.surface)
+        self.ax.set_facecolor(self.surface)
+        self.ax.set_xlabel('Pulse number', color=self.muted)
+        self.ax.set_ylabel('RX dBFS', color=self.muted)
+        self.ax.tick_params(colors=self.muted)
+        for spine in self.ax.spines.values(): spine.set_color('#3b526c')
+        self.ax.grid(True, color='#344962', alpha=0.55)
+        self.fig.tight_layout(pad=2)
+        self.canvas=FigureCanvasTkAgg(self.fig,master=plot_frame)
+        self.canvas.get_tk_widget().pack(fill='x')
+        log_frame=ttk.LabelFrame(right,text='APPLICATION LOG',padding=10,style='Card.TLabelframe')
+        log_frame.grid(row=2,column=0,sticky='nsew',pady=8)
+        log_frame.rowconfigure(0,weight=1);log_frame.columnconfigure(0,weight=1)
+        self.log=tk.Text(log_frame,wrap='word',height=10, bg='#0a1422', fg='#d9e9f8', insertbackground='#ffffff', selectbackground='#245b87', relief='flat', padx=14, pady=12, font=('DejaVu Sans Mono', 10))
+        self.log.grid(sticky='nsew')
+        log_scroll=ttk.Scrollbar(log_frame,command=self.log.yview)
+        log_scroll.grid(row=0,column=1,sticky='ns');self.log.configure(yscrollcommand=log_scroll.set)
+        self.make_parser(parser)
+        self.toggle_remote()
+        root.after(80,self.drain_messages)
+        root.after(200,self.auto_check_usrp_connection)
+        root.after(400,self.auto_check_gps_antenna)
+        root.protocol('WM_DELETE_WINDOW',self.close)
 
-    t = time.time() - start_time
+    def make_parser(self, frame):
+        frame.columnconfigure(0, weight=0)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=0)
+        self.parser_in = tk.StringVar()
+        self.parser_out = tk.StringVar()
 
-    rx_dbfs = float(m_rx.group(1))
-    tx_dbfs = float(m_tx.group(1))
+        panel = ttk.LabelFrame(frame, text='Convert Measurements to CSV',
+                               padding=20, style='Card.TLabelframe')
+        panel.grid(row=0, column=0, columnspan=3, sticky='ew', padx=20, pady=20)
+        panel.columnconfigure(1, weight=1)
 
-    tx_time.append(t)
-    rx_dbfs_values.append(rx_dbfs)
-    tx_dbfs_values.append(tx_dbfs)
+        ttk.Label(panel, text='Input binary file (.dat)', style='Card.TLabel').grid(
+            row=0, column=0, sticky='w', padx=(0, 12), pady=10)
+        ttk.Entry(panel, textvariable=self.parser_in, width=55).grid(
+            row=0, column=1, sticky='ew', pady=10)
+        ttk.Button(panel, text='Browse…', command=lambda: self.pick_open(self.parser_in)).grid(
+            row=0, column=2, padx=(10, 0), pady=10)
 
-    # Plot 1: tracking over time
-    ax.clear()
+        ttk.Label(panel, text='Output CSV file', style='Card.TLabel').grid(
+            row=1, column=0, sticky='w', padx=(0, 12), pady=10)
+        ttk.Entry(panel, textvariable=self.parser_out, width=55).grid(
+            row=1, column=1, sticky='ew', pady=10)
+        ttk.Button(panel, text='Browse…', command=lambda: self.pick_save(self.parser_out, '.csv')).grid(
+            row=1, column=2, padx=(10, 0), pady=10)
 
-    ax.plot(list(tx_time), list(rx_dbfs_values), label="RX dBFS")
-    ax.plot(list(tx_time), list(tx_dbfs_values), label="TX dBFS")
+        ttk.Button(panel, text='Convert to CSV', command=self.parse_file,
+                   style='Accent.TButton').grid(row=2, column=1, sticky='e', pady=(15, 6))
+        self.parse_status = tk.StringVar(value='Ready')
+        ttk.Label(panel, textvariable=self.parse_status, style='Card.TLabel').grid(
+            row=3, column=0, columnspan=3, sticky='w', pady=(8, 0))
 
- #   if threshold_dbfs is not None:
- #       ax.axhline(
- #           y=threshold_dbfs,
- #           linestyle="--",
- #           linewidth=2,
- #           label=f"Threshold ({threshold_dbfs:.1f} dBFS)"
- #       )
+    def pick_open(self,var):
+        path=filedialog.askopenfilename(filetypes=[('Binary measurements','*.dat'),('All files','*')]);
+        if path:
+            var.set(path)
+            if var is self.parser_in and not self.parser_out.get():self.parser_out.set(os.path.splitext(path)[0]+'.csv')
+    def pick_save(self,var,ext='.dat'):
+        path=filedialog.asksaveasfilename(defaultextension=ext,filetypes=[('Files','*'+ext),('All files','*')]);
+        if path:var.set(path)
+    def pick_bit(self):
+        path=filedialog.askopenfilename(filetypes=[('Bitstream','*.bit'),('All files','*')]);
+        if path:self.v['bitfile'].set(path)
+    def update_port_leds(self):
+        """Show selected RX (green), TX (red), or unused (grey) ports.
 
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("dBFS")
-    ax.set_title("RX vs TX amplitude tracking")
-    ax.grid(True)
-    ax.legend()
+        TRX-A/B can be selected for both directions; in that case the
+        indicator is split into green and red halves.
+        """
+        canvas = self.port_canvas
+        canvas.delete('all')
+        ports = ('TRX-A', 'RX2-A', 'RX2-B', 'TRX-B')
+        width = max(canvas.winfo_width(), 350)
+        spacing = width / len(ports)
+        rx, tx = self.rxport.get(), self.txport.get()
+        for idx, port in enumerate(ports):
+            x = (idx + 0.5) * spacing
+            y, r = 22, 12
+            is_rx, is_tx = (port == rx), (port == tx)
+            if is_rx and is_tx:
+                canvas.create_arc(x-r, y-r, x+r, y+r, start=90, extent=180,
+                                  fill='#35d07f', outline='')
+                canvas.create_arc(x-r, y-r, x+r, y+r, start=270, extent=180,
+                                  fill='#f05a65', outline='')
+                state = 'RX + TX'
+            else:
+                color = '#35d07f' if is_rx else '#f05a65' if is_tx else '#657286'
+                canvas.create_oval(x-r, y-r, x+r, y+r, fill=color,
+                                   outline='#9da9ba' if not (is_rx or is_tx) else color,
+                                   width=1)
+                state = 'RX' if is_rx else 'TX' if is_tx else 'Disabled'
+            canvas.create_text(x, 50, text=port, fill=self.fg,
+                               font=('DejaVu Sans', 10, 'bold'))
+            canvas.create_text(x, 69, text=state,
+                               fill=self.muted, font=('DejaVu Sans', 9))
+        # Lower connectors are GPS on the left and SYNC on the right.
+        for x, label, status in ((width * .25, 'GPS', self.gps_test_state),
+                                 (width * .75, 'SYNC', self.sync_test_state)):
+            active = (label == 'GPS' and status == 'MODE 3')
+            color = '#35d07f' if active else '#657286'
+            canvas.create_oval(x-11, 96, x+11, 118, fill=color, outline=color)
+            canvas.create_text(x, 132, text=label, fill=self.fg,
+                               font=('DejaVu Sans', 10, 'bold'))
+            canvas.create_text(x, 151, text=status, fill=self.muted,
+                               font=('DejaVu Sans', 9))
 
+    def set_gps_details(self, fix):
+        """Show actual 3D-fix coordinates and GPS UTC time, never placeholders as fixes."""
+        if not fix or fix.get('mode') != 3:
+            for key in ('latitude', 'longitude', 'altitude', 'gps_time'):
+                self.metric_vars[key].set('—')
+            return
+        for key, source, suffix, digits in (
+            ('latitude', 'lat', '°', 6),
+            ('longitude', 'lon', '°', 6),
+            ('altitude', 'alt', ' m', 1)
+        ):
+            value = fix.get(source)
+            self.metric_vars[key].set(
+                f'{value:.{digits}f}{suffix}' if isinstance(value, (int, float)) else '—')
+        utc = fix.get('time')
+        self.metric_vars['gps_time'].set(str(utc).replace('T', ' ').replace('Z', ' UTC')
+                                         if utc else '—')
 
+    def _run_gps_check(self, manual=False):
+        """Check GPSD independently of Find USRP, in a background thread."""
+        if self._gps_check_running:
+            if manual:
+                self.emit('[GPS-TEST] A GPS check is already running.\n')
+            return
+        self._gps_check_running = True
+        generation = self._gps_check_generation
+        ip = self.v['ip'].get().strip()
+        user = self.v['user'].get().strip() or 'root'
+        if manual:
+            self.gps_test_label.set('GPS: TESTING MODE 3...')
+            self.emit('[GPS-TEST] Checking GPSD for a 3D fix...\n')
 
-    canvas1.draw_idle()
-
-
-def add_field(parent, row, label, default):
-    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=4, pady=3)
-    var = tk.StringVar(value=default)
-    ttk.Entry(parent, textvariable=var, width=24).grid(row=row, column=1, sticky="ew", padx=4, pady=3)
-    return var
-def set_field_state(var, state):
-    def search(parent):
-        for widget in parent.winfo_children():
-            if (
-                isinstance(widget, ttk.Entry)
-                and widget.cget("textvariable") == str(var)
-            ):
-                widget.configure(state=state)
-                return True
-
-            if search(widget):
-                return True
-
-        return False
-
-    search(frame)
-def set_field_visible(var, visible):
-    def search(parent):
-        for widget in parent.winfo_children():
-            if (
-                isinstance(widget, ttk.Entry)
-                and widget.cget("textvariable") == str(var)
-            ):
-                row = widget.grid_info().get("row")
-
-                for sibling in parent.winfo_children():
-                    if sibling.grid_info().get("row") == row:
-                        if visible:
-                            sibling.grid()
-                        else:
-                            sibling.grid_remove()
-
-                return True
-
-            if search(widget):
-                return True
-
-        return False
-
-    search(frame)
-def browse_output_file():
-    selected_mode = mode.get()
-
-    if selected_mode == "Convert to CSV":
-        filename = filedialog.askopenfilename(
-            title="Select binary file to convert",
-            initialdir=os.path.dirname(rx_output.get()),
-            filetypes=[
-                ("Binary files", "*.dat"),
-                ("All files", "*.*"),
-            ],
-        )
-    else:
-        filename = filedialog.asksaveasfilename(
-            title="Select output file",
-            initialdir=os.path.dirname(rx_output.get()),
-            initialfile=os.path.basename(rx_output.get()),
-            defaultextension=".dat",
-            filetypes=[
-                ("Binary files", "*.dat"),
-                ("All files", "*.*"),
-            ],
-        )
-
-    if filename:
-        rx_output.set(filename)
-
-def update_fields_for_mode(*args):
-    selected = mode.get()
-    selected_target = execution_target.get()
-    set_field_visible(pulse_gap, False)
-
-    # Hide all conditional sections first
-    e312_frame.grid_remove()
-    rx_frame.grid_remove()
-    tx_frame.grid_remove()
-    sampling_frame.grid_remove()
-    pulse_frame.grid_remove()
-    file_frame.grid_remove()
-    fpga_frame.grid_remove()
-    download_rx_button.grid_remove()
-    antenna_frame.grid_remove()
-
-
-    # Show the E312 connection panel only for the E312 target
-    if selected_target == "USRP E312":
-        e312_frame.grid()
-
-    # Restore SPP state by default
-    set_field_state(spp, "normal")
-
-    # Hide all mode-dependent sections first
-    rx_frame.grid_remove()
-    tx_frame.grid_remove()
-    sampling_frame.grid_remove()
-    pulse_frame.grid_remove()
-    file_frame.grid_remove()
-    fpga_frame.grid_remove()
-
-    # Restore SPP state by default
-    set_field_state(spp, "normal")
-
-    if selected in ("Pulse", "Combined Mode"):
-        if selected == "Combined Mode":
-            set_field_visible(pulse_gap, True)
-
-            file_frame.grid()
-            file_frame.config(text="Trigger Measurement File")
-            browse_output_button.config(text="Choose measurement file")
-            save_data_cb.grid()
-
-            if save_data.get():
-                set_field_visible(rx_output, True)
-                browse_output_button.grid()
-
-                if selected_target == "USRP E312":
-                    download_rx_button.grid()
+        def work():
+            state, label = 'UNAVAILABLE', 'GPS: GPSD / SSH UNAVAILABLE'
+            best_fix = None
+            details = ''
+            try:
+                # Discover the address automatically; Find USRP is not required.
+                target_ip = ip
+                if not target_ip:
+                    discovery = subprocess.run(['uhd_find_devices'],
+                        capture_output=True, text=True, timeout=8)
+                    match = re.search(r'\baddr:\s*(\d{1,3}(?:\.\d{1,3}){3})',
+                                      discovery.stdout + discovery.stderr)
+                    if match:
+                        target_ip = match.group(1)
+                if not target_ip:
+                    label = 'GPS: USRP NOT DISCOVERED'
                 else:
-                    download_rx_button.grid_remove()
+                    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+                           '-o', 'StrictHostKeyChecking=accept-new',
+                           f'{user}@{target_ip}', 'gpspipe -w -n 12']
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                    fixes = []
+                    for line in result.stdout.splitlines():
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if obj.get('class') == 'TPV':
+                            fixes.append(obj)
+                    valid = any(fix.get('mode') == 3 and
+                                isinstance(fix.get('lat'), (int, float)) and
+                                isinstance(fix.get('lon'), (int, float))
+                                for fix in fixes)
+                    if valid:
+                        best_fix = next(fix for fix in reversed(fixes)
+                                        if fix.get('mode') == 3
+                                        and isinstance(fix.get('lat'), (int, float))
+                                        and isinstance(fix.get('lon'), (int, float)))
+                        state, label = 'MODE 3', 'GPS: MODE 3 (3D FIX)'
+                    elif fixes:
+                        state, label = 'NO FIX', 'GPS: NO MODE 3 FIX'
+                    if manual:
+                        details = (f'[GPS-TEST] {label} (USRP {target_ip})\n'
+                                   if result.returncode == 0 or fixes else
+                                   f'[GPS-TEST] {label}: {result.stderr.strip()}\n')
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                if manual:
+                    details = f'[GPS-TEST] GPS check failed: {exc}\n'
+            finally:
+                self.messages.put(('gps_test', (generation, state, label, best_fix)))
+                if details:
+                    self.messages.put(('log', details))
+                self.messages.put(('gps_check_finished', None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def test_gps_antenna(self):
+        """Manual on-demand test, in addition to automatic GPS monitoring."""
+        self._run_gps_check(manual=True)
+
+    def auto_check_gps_antenna(self):
+        """Start on GUI launch and repeat every 20 seconds."""
+        self._run_gps_check()
+        self.root.after(20000, self.auto_check_gps_antenna)
+
+    def toggle_remote(self):
+        # Connection tools are permanently visible in the right sidebar.
+        pass
+    def emit(self,s):self.messages.put(('log',s))
+    def drain_messages(self):
+        try:
+            while True:
+                kind,payload=self.messages.get_nowait()
+                if kind=='log':
+                    self.log.insert('end',payload);self.log.see('end')
+                    self.update_instrument_metrics(payload)
+                    match=re.search(r'RX_dBFS\s*=\s*(-?\d+(?:\.\d+)?)',payload)
+                    if match:
+                        self.x.append(self.pulse_count);self.y.append(float(match.group(1)))
+                        if self.pulse_count%5==0:self.refresh_plot()
+                elif kind=='usrp_connection':
+                    generation, connected, label = payload
+                    if generation == self._usrp_check_generation:
+                        self.set_usrp_connection(connected, label)
+                elif kind=='usrp_check_finished':
+                    self._usrp_check_running = False
+                elif kind=='gps_test':
+                    generation, state, label, fix = payload
+                    if generation == self._gps_check_generation:
+                        self.gps_test_state = state
+                        self.gps_test_label.set(label)
+                        self.set_gps_details(fix)
+                        self.update_port_leds()
+                elif kind=='gps_check_finished':
+                    self._gps_check_running = False
+                elif kind=='done':
+                    self.proc=None
+                    self.metric_vars['state'].set('IDLE' if payload==0 else 'STOPPED')
+                    self.emit(f'\nProcess finished (exit code {payload}).\n')
+                elif kind=='parse':self.parse_status.set(payload)
+        except queue.Empty:pass
+        self.root.after(80,self.drain_messages)
+    def update_instrument_metrics(self, line):
+        # The physical SYNC connector is unused. GPS/PPS software sync
+        # must not light its LED; UTC status is shown in GPS metrics.
+        # Values come from the running C++ process; no fabricated telemetry.
+        m=re.search(r'RX_dBFS\s*=\s*(-?\d+(?:\.\d+)?)',line)
+        if m:self.metric_vars['power'].set(f'{float(m.group(1)):.2f} dBFS')
+        m=re.search(r'\bSEQ=(\d+)',line)
+        if m:
+            seq=int(m.group(1))
+            if self.last_seq is None:
+                self.pulse_count=1
             else:
-                set_field_visible(rx_output, False)
-                browse_output_button.grid_remove()
-                download_rx_button.grid_remove()
-
-        else:
-            set_field_visible(pulse_gap, False)
-
-            file_frame.grid_remove()
-            save_data_cb.grid_remove()
-            download_rx_button.grid_remove()
-
-        antenna_frame.grid()
-        rx_frame.grid()
-        tx_frame.grid()
-        sampling_frame.grid()
-        pulse_frame.grid()
-        fpga_frame.grid()
-
-        rx_port_combo.configure(state="readonly")
-        tx_port_combo.configure(state="readonly")
-
-        rate_note.config(
-            text="Recommended rate for Pulse mode: 60 MSPS"
-        )
-
-
-    elif selected == "CW":
-
-        antenna_frame.grid()
-
-        tx_frame.grid()
-
-        sampling_frame.grid()
-
-        # CW only uses the TX antenna.
-
-        rx_port_combo.configure(state="disabled")
-
-        tx_port_combo.configure(state="readonly")
-
-        rate.set("1")
-
-        set_field_state(spp, "disabled")
-
-        rate_note.config(
-
-            text="Recommended rate is 1 MSPS"
-
-        )
-
-
-
-    elif selected == "RX to File":
-
-        antenna_frame.grid()
-
-        rx_frame.grid()
-
-        sampling_frame.grid()
-
-        file_frame.grid()
-
-        # RX-to-file only uses the RX antenna.
-
-        rx_port_combo.configure(state="readonly")
-
-        tx_port_combo.configure(state="disabled")
-
-        file_frame.config(text="RX Output File")
-
-        browse_output_button.config(text="Choose local output file")
-
-        rate.set("1")
-
-        if execution_target.get() == "USRP E312":
-            download_rx_button.grid()
-
-        rate_note.config(
-
-            text="Recommended rate for RX to File: 1 MSPS"
-
-        )
-
-    elif selected == "Convert to CSV":
-        file_frame.grid()
-
-        file_frame.config(text="Binary File to Convert")
-        browse_output_button.config(text="Choose input .dat file")
-
-def append_output(text):
-    output.insert(tk.END, text)
-    output.see(tk.END)
-
-
-def read_process_output(p, finished_msg):
-    for line in p.stdout:
-        append_output(line)
-        update_plot_from_line(line)
-
-    rc = p.wait()
-    append_output(f"\n{finished_msg} Return code: {rc}\n\n")
-
-def get_antenna_settings():
-    rx_port = rx_port_combo.get()
-    tx_port = tx_port_combo.get()
-
-    rx_map = {
-        "TRX-A": ("0", "TX/RX"),
-        "RX2-A": ("0", "RX2"),
-        "TRX-B": ("1", "TX/RX"),
-        "RX2-B": ("1", "RX2"),
-    }
-
-    tx_map = {
-        "TRX-A": ("0", "TX/RX"),
-        "TRX-B": ("1", "TX/RX"),
-    }
-
-    rx_chan, rx_ant_name = rx_map[rx_port]
-    tx_chan, tx_ant_name = tx_map[tx_port]
-
-    return rx_chan, rx_ant_name, tx_chan, tx_ant_name
-
-def start_app():
-    global proc
-    global threshold_dbfs
-    global start_time
-    process_cwd = WORKDIR
-
-    if proc is not None:
-        messagebox.showinfo("Already running", "App is already running.")
-        return
-    selected_mode = mode.get()
-    selected_target = execution_target.get()
-    rx_chan, rx_ant_name, tx_chan, tx_ant_name = get_antenna_settings()
-
-
-
-    try:
-        rx_freq_hz = float(rx_freq.get()) * 1e6
-        tx_freq_hz = float(tx_freq.get()) * 1e6
-        rate_sps   = float(rate.get()) * 1e6
-
-        tx_bw_hz = 0.0
-        rx_bw_hz = 0.0
-
-        if tx_bw.get().strip():
-            tx_bw_hz = float(tx_bw.get()) * 1e6
-
-        if rx_bw.get().strip():
-            rx_bw_hz = float(rx_bw.get()) * 1e6
-
-    except ValueError:
-        messagebox.showerror("Invalid input", "Check frequency, rate, and BW values.")
-        return
-
-    tx_time.clear()
-    rx_dbfs_values.clear()
-    tx_dbfs_values.clear()
-    start_time = None
-
-    if selected_mode == "CW":
-        process_cwd = WORKDIR
-        cw_args = [
-            "--tx-freq", str(tx_freq_hz),
-            "--tx-gain", tx_gain.get(),
-            "--tx-ant", tx_ant_name,
-            "--tx-chan", tx_chan,
-            "--rate", str(rate_sps),
-        ]
-
-        if tx_bw_hz > 0:
-            cw_args += [
-                "--tx-bw",
-                str(tx_bw_hz),
-            ]
-
-        process_cwd = WORKDIR
-
-        if selected_target == "Host PC":
-            cmd = [
-                sys.executable,
-                APP_CW,
-                *cw_args,
-            ]
-
-            append_output(
-                "Starting CW app on Host PC:\n"
-                + " ".join(cmd)
-                + "\n\n"
-            )
-
-
-        else:
-
-            ip = e312_ip.get().strip()
-
-            user = e312_user.get().strip()
-
-            if not ip:
-                messagebox.showerror(
-
-                    "USRP not found",
-
-                    "Press Find USRP first."
-
-                )
-
-                return
-
-            if not user:
-                messagebox.showerror(
-
-                    "Missing username",
-
-                    "Enter the E312 SSH username."
-
-                )
-
-                return
-
-            target = f"{user}@{ip}"
-
-            remote_command = (
-                    f"export LD_LIBRARY_PATH="
-                    f"{shlex.quote(REMOTE_UHD_LIB_DIR)}:"
-                    "$LD_LIBRARY_PATH"
-                    " && "
-                    f"cd {shlex.quote(REMOTE_CW_DIR)}"
-                    " && "
-                    f"echo $$ > {shlex.quote(REMOTE_CW_PID_FILE)}"
-                    " && "
-                    f"exec python3 {shlex.quote(REMOTE_CW_APP)} "
-                    + " ".join(
-                shlex.quote(str(arg))
-                for arg in cw_args
-            )
-            )
-
-            cmd = [
-
-                "ssh",
-
-                "-o", "ConnectTimeout=5",
-
-                target,
-
-                remote_command,
-
-            ]
-
-            process_cwd = WORKDIR
-
-            append_output(
-
-                f"Starting cw application on {target}:\n"
-
-                f"{remote_command}\n\n"
-
-            )
-    elif selected_mode == "RX to File":
+                self.pulse_count+=max(1,(seq-self.last_seq)&0xffff)
+            self.last_seq=seq
+            self.metric_vars['count'].set(f'{self.pulse_count:,}')
+        m=re.search(r'\bPRI_US=(-?\d+(?:\.\d+)?)',line)
+        if m:self.metric_vars['pri'].set(f'{float(m.group(1)):.2f} µs')
+        if 'GPS_FIX_UTC=' in line:
+            data = re.search(
+                r'GPS_FIX_UTC=(.*?)\\s+LAT=([^\\s]+)\\s+LON=([^\\s]+)\\s+ALT=([^\\s]+)',
+                line)
+            if data and self.gps_test_state == 'MODE 3':
+                try:
+                    utc, lat, lon, alt = data.groups()
+                    self.set_gps_details({'mode': 3, 'time': utc,
+                                          'lat': float(lat), 'lon': float(lon),
+                                          'alt': float(alt)})
+                except ValueError:
+                    pass
+            m=re.search(r'GPS_FIX_UTC=(.*?)(?:\s+LAT=|$)',line)
+            if m:
+                fix=m.group(1).strip()
+                self.metric_vars['gps'].set('NO FIX' if fix in ('No GPS Time','') else 'FIX RECEIVED')
+        elif '[GPS-SYNC] VERIFIED:' in line:
+            self.metric_vars['gps'].set('UTC SYNCED')
+        elif 'GPS-SYNC' in line and ('timeout' in line.lower() or 'mismatch' in line.lower()):
+            self.metric_vars['gps'].set('SYNC ERROR')
+        elif '[GPS] Failed' in line:
+            self.metric_vars['gps'].set('GPSD ERROR')
+
+    def refresh_plot(self):
+        self.ax.clear()
+        self.ax.set_facecolor(self.surface)
+        self.ax.plot(list(self.x),list(self.y),color=self.accent,linewidth=1.8,label='RX dBFS')
+        self.ax.set_xlabel('Pulse number',color=self.muted)
+        self.ax.set_ylabel('RX dBFS',color=self.muted)
+        self.ax.tick_params(colors=self.muted)
+        for spine in self.ax.spines.values(): spine.set_color('#3b526c')
+        self.ax.grid(True,color='#344962',alpha=0.55)
+        if self.x:
+            self.ax.legend(loc='upper right',facecolor=self.surface,edgecolor='#344962',labelcolor=self.fg)
+        self.canvas.draw_idle()
+    def clear(self):self.log.delete('1.0','end')
+    def run_command(self,cmd,cwd=WORKDIR):
+        if self.proc and self.proc.poll() is None:
+            messagebox.showwarning('Running','Stop the current process first.');return
+        self.emit('$ '+' '.join(shlex.quote(str(x)) for x in cmd)+'\n')
         try:
-            threshold_dbfs = float(threshold.get())
-
-            thr = int(
-                  round(
-                    32767.0
-                      * pow(10.0, threshold_dbfs / 20.0)
-                   )
-            )
-
-            thr = max(0, min(32767, thr))
-
-        except ValueError:
-            messagebox.showerror(
-                "Invalid input",
-                  "Threshold must be a valid dBFS value."
-            )
-            return
-
-        rx_args = [
-                "--freq", str(rx_freq_hz),
-                "--gain", rx_gain.get(),
-                "--ant", rx_ant_name,
-                "--radio-chan", rx_chan,
-                "--rate", str(rate_sps),
-                "--threshold", str(threshold.get()),
-            ]
-
-        if rx_bw_hz > 0:
-            rx_args += [
-                "--bw",
-                str(rx_bw_hz),
-            ]
-
-        if spp.get().strip():
-            rx_args += [
-                "--spp",
-                spp.get(),
-            ]
-
-        process_cwd = WORKDIR
-
-        if selected_target == "Host PC":
-            cmd = [
-                APP_RX,
-                *rx_args,
-                "--file", rx_output.get(),
-            ]
-
-            append_output(
-                "Starting RX-to-File on Host PC:\n"
-                + " ".join(cmd)
-                + "\n\n"
-            )
-
+            self.proc=subprocess.Popen(cmd,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1,start_new_session=True)
+        except Exception as e:
+            self.proc=None;messagebox.showerror('Launch failed',str(e));return
+        self.metric_vars['state'].set('RUNNING')
+        process=self.proc
+        def worker():
+            for line in process.stdout:self.emit(line)
+            self.messages.put(('done',process.wait()))
+        threading.Thread(target=worker,daemon=True).start()
+    def build_args(self):
+        v=lambda k:self.v[k].get().strip()
+        rate=float(v('rate'));threshold=float(v('threshold'))
+        if rate<=0:raise ValueError('Rate must be positive')
+        thr=max(0,min(32767,round(32767*10**(threshold/20))))
+        # Retain original GUI conversion: 100 MHz CE clock, 14 us fixed delay compensation.
+        delay_counts=max(0,round((float(v('delay'))-14.0)*100))
+        pw_counts=max(1,round(float(v('pw'))*rate))
+        gap_counts=max(0,round(float(v('gap'))*100))
+        rxmap={'TRX-A':('0','TX/RX'),'RX2-A':('0','RX2'),'TRX-B':('1','TX/RX'),'RX2-B':('1','RX2')}
+        txmap={'TRX-A':('0','TX/RX'),'TRX-B':('1','TX/RX')}
+        rxchan,rxant=rxmap[self.rxport.get()];txchan,txant=txmap[self.txport.get()]
+        args=['--rx-freq',str(float(v('rx_freq'))*1e6),'--tx-freq',str(float(v('tx_freq'))*1e6),
+              '--rx-gain',v('rx_gain'),'--tx-gain',v('tx_gain'),'--rx-ant',rxant,'--tx-ant',txant,
+              '--rx-chan',rxchan,'--tx-chan',txchan,'--threshold',str(thr),'--avg-delay',v('avg_delay'),
+              '--delay',str(delay_counts),'--pw',str(pw_counts),'--pulse-gap',str(gap_counts),
+              '--spp',v('spp'),'--rate',str(rate*1e6)]
+        for key,option in [('rx_bw','--rx-bw'),('tx_bw','--tx-bw')]:
+            if v(key):args.extend([option,str(float(v(key))*1e6)])
+        if self.gps.get():args.extend(['--gps', '--pps', 'gpsdo', '--ref', 'internal'])
+        if self.save.get():args.extend(['--save-data','--output-file',v('output') if self.target.get()=='Host PC' else REMOTE_FILE])
+        return args
+    def start(self):
+        try:args=self.build_args()
+        except Exception as e:messagebox.showerror('Invalid parameters',str(e));return
+        self.x.clear();self.y.clear();self.pulse_count=0;self.refresh_plot()
+        self.last_seq=None
+        self.metric_vars['count'].set('0')
+        self.metric_vars['power'].set('— dBFS')
+        self.metric_vars['pri'].set('— µs')
+        self.metric_vars['gps'].set('WAITING')
+        self.sync_test_state = 'Disconnected'
+        self.update_port_leds()
+        self.metric_vars['freq'].set(f"{self.v['rx_freq'].get().strip()} MHz")
+        self.run_target=self.target.get()
+        if self.run_target=='Host PC':self.run_command([HOST_APP,*args])
         else:
-            ip = e312_ip.get().strip()
-            user = e312_user.get().strip()
-
-            if not ip:
-                messagebox.showerror(
-                    "USRP not found",
-                    "Press Find USRP first."
-                )
-                return
-
-            if not user:
-                messagebox.showerror(
-                    "Missing username",
-                    "Enter the E312 SSH username."
-                )
-                return
-
-            target = f"{user}@{ip}"
-
-            remote_args = [
-                *rx_args,
-                "--file", REMOTE_RX_FILE,
-            ]
-
-            remote_command = (
-                    f"cd {shlex.quote(REMOTE_RX_DIR)}"
-                    " && "
-                    f"echo $$ > {shlex.quote(REMOTE_RX_PID_FILE)}"
-                    " && "
-                    f"exec {REMOTE_RX_APP} "
-                    + " ".join(
-                shlex.quote(str(arg))
-                for arg in remote_args
-            )
-            )
-
-            cmd = [
-                "ssh",
-                "-o", "ConnectTimeout=5",
-                target,
-                remote_command,
-            ]
-
-            append_output(
-                f"Starting RX-to-File on {target}:\n"
-                f"{remote_command}\n\n"
-                f"Remote output file:\n{REMOTE_RX_FILE}\n\n"
-            )
-
-
-        append_output(
-            "Starting RX-to-File app:\n"
-            + " ".join(cmd)
-            + "\n\n"
-        )
-    elif selected_mode == "Convert to CSV":
-
-        process_cwd = WORKDIR
-
-        cmd = [
-            sys.executable,
-            APP_CONVERT,
-            "--input",
-            rx_output.get(),
-        ]
-
-        append_output(
-            "Starting binary-to-CSV converter:\n"
-            + " ".join(cmd)
-            + "\n\n"
-        )
-
-
-    else:
-
+            ip=self.v['ip'].get().strip();user=self.v['user'].get().strip()
+            if not ip or not user:messagebox.showerror('SSH','Enter USRP IP and username');return
+            command=(f'export LD_LIBRARY_PATH={shlex.quote(REMOTE_LIB)}:$LD_LIBRARY_PATH && '
+                     f'cd {shlex.quote(REMOTE_DIR)} && echo $$ > {shlex.quote(REMOTE_PID)} && '
+                     f'exec {REMOTE_APP} '+' '.join(shlex.quote(x) for x in args))
+            self.run_command(['ssh','-o','ConnectTimeout=5',f'{user}@{ip}',command])
+    def stop(self):
+        process=self.proc
+        if process is None or process.poll() is not None:return
+        self.metric_vars['state'].set('STOPPING')
+        if self.run_target=='USRP E312':
+            ip=self.v['ip'].get().strip();user=self.v['user'].get().strip()
+            command=(f'pid=$(cat {shlex.quote(REMOTE_PID)} 2>/dev/null); '
+                     'if [ -n "$pid" ]; then kill -INT "$pid" 2>/dev/null; fi; '
+                     f'rm -f {shlex.quote(REMOTE_PID)}')
+            threading.Thread(target=lambda:self.remote_stop(user,ip,command),daemon=True).start()
+        else:
+            try:os.killpg(os.getpgid(process.pid),signal.SIGINT)
+            except ProcessLookupError:pass
+    def remote_stop(self,user,ip,command):
         try:
-            threshold_dbfs = float(threshold.get())
-
-            thr = int(
-                round(
-                    32767.0
-                    * pow(10.0, threshold_dbfs / 20.0)
-                )
-            )
-
-            thr = max(0, min(32767, thr))
-
-            delay_us = float(delay.get())
-
-            delay_counts = max(
-                0,
-                int(round((delay_us - 14.0) / 0.01))
-            )
-
-            pw_us = float(pulsewidth.get())
-
-            pw_counts = max(
-                1,
-                int(round(pw_us * float(rate.get())))
-            )
-
-            gap_counts = 0
-
-            if selected_mode == "Combined Mode":
-                gap_us = float(pulse_gap.get())
-
-                gap_counts = int(round(gap_us * 100.0))
-
-
-        except ValueError:
-            messagebox.showerror(
-                "Invalid input",
-                "Check threshold, delay, pulse width, and pulse gap values."
-            )
-            return
-        pulse_args = [
-            "--rx-freq", str(rx_freq_hz),
-            "--tx-freq", str(tx_freq_hz),
-
-            "--rx-gain", rx_gain.get(),
-            "--tx-gain", tx_gain.get(),
-
-            "--rx-ant", rx_ant_name,
-            "--tx-ant", tx_ant_name,
-            "--rx-chan", rx_chan,
-            "--tx-chan", tx_chan,
-
-            "--threshold", str(thr),
-            "--avg-delay", avg_delay.get(),
-            "--delay", str(delay_counts),
-            "--pw", str(pw_counts),
-            "--spp", spp.get(),
-            "--rate", str(rate_sps),
-        ]
-        if selected_mode == "Combined Mode":
-            pulse_args += [
-                "--pulse-gap",
-                str(gap_counts),
-            ]
-            if selected_target == "Host PC":
-                output_file = rx_output.get()
-            else:
-                output_file = REMOTE_MEAS_FILE
-
-            if save_data.get():
-                pulse_args += [
-                    "--save-data",
-                    "--output-file",
-                    output_file,
-                ]
-
-        if rx_bw_hz > 0:
-            pulse_args += [
-
-                "--rx-bw",
-
-                str(rx_bw_hz),
-
-            ]
-
-        if tx_bw_hz > 0:
-            pulse_args += [
-
-                "--tx-bw",
-
-                str(tx_bw_hz),
-
-            ]
-
-        if selected_target == "Host PC":
-
-            cmd = [
-
-                APP_PULSE,
-
-                *pulse_args,
-
-
-            ]
-
-            process_cwd = WORKDIR
-
-            append_output(
-
-                f"Starting {selected_mode} app on Host PC:\n"
-
-                + " ".join(cmd)
-
-                + "\n\n"
-
-            )
-
-
-        else:
-
-            ip = e312_ip.get().strip()
-
-            user = e312_user.get().strip()
-
-            if not ip:
-                messagebox.showerror(
-
-                    "USRP not found",
-
-                    "Press Find USRP first."
-
-                )
-
-                return
-
-            target = f"{user}@{ip}"
-
-            remote_pulse_args = list(pulse_args)
-
-
-
-            remote_command = (
-                    f"export LD_LIBRARY_PATH="
-                    f"{shlex.quote(REMOTE_UHD_LIB_DIR)}:"
-                    "$LD_LIBRARY_PATH"
-                    " && "
-                    f"cd {shlex.quote(REMOTE_PULSE_DIR)}"
-                    " && "
-                    f"echo $$ > {shlex.quote(REMOTE_PULSE_PID_FILE)}"
-                    " && "
-                    f"exec {REMOTE_PULSE_APP} "
-                    + " ".join(
-                shlex.quote(str(arg))
-                for arg in remote_pulse_args
-            )
-            )
-
-            cmd = [
-
-                "ssh",
-
-                "-o", "ConnectTimeout=5",
-
-                target,
-
-                remote_command,
-
-            ]
-
-            process_cwd = WORKDIR
-
-            append_output(
-
-                f"Starting {selected_mode} app on {target}:\n"
-
-                f"{remote_command}\n\n"
-
-            )
-
-    proc = subprocess.Popen(
-        cmd,
-        cwd=process_cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        preexec_fn=os.setsid,
-    )
-
-    def monitor():
-        global proc
-
-        if selected_mode in ("Pulse", "Combined Mode"):
-            read_process_output(proc, f"{selected_mode} app finished.")
-
-        elif selected_mode == "CW":
-            read_process_output(proc, "CW app finished.")
-
-        elif selected_mode == "RX to File":
-            read_process_output(proc, "RX-to-File app finished.")
-
-        elif selected_mode == "Convert to CSV":
-            read_process_output(proc, "CSV conversion finished.")
-
-            output_dir = os.path.join(WORKDIR, "csv_output")
-
+            r=subprocess.run(['ssh','-o','ConnectTimeout=5',f'{user}@{ip}',command],capture_output=True,text=True,timeout=10)
+            self.emit(r.stdout+r.stderr)
+        except Exception as e:self.emit(f'Remote stop failed: {e}\n')
+    def set_usrp_connection(self, connected, label):
+        # This LED represents UHD device discovery, not SSH or GPS/PPS lock.
+        self.usrp_connection_led.itemconfigure(
+            self.usrp_connection_led_dot, fill='#35d07f' if connected else '#657286')
+        self.usrp_connection_label.set(label)
+
+    def _gps_identity_changed(self, *_):
+        self._gps_check_generation += 1
+        self.gps_test_state = 'CHECKING'
+        self.gps_test_label.set('GPS: CHECKING...')
+        self.update_port_leds()
+
+    def _usrp_ip_changed(self, *_):
+        # Discard a result from a check started for the previous IP.
+        self._usrp_check_generation += 1
+        self.set_usrp_connection(False, 'USRP: CHECKING...')
+        self._gps_check_generation += 1
+        self.gps_test_state = 'CHECKING'
+        self.gps_test_label.set('GPS: CHECKING...')
+        self.update_port_leds()
+
+    def auto_check_usrp_connection(self):
+        """Check UHD discovery on startup and every 5 seconds, without blocking Tk."""
+        if not self._usrp_check_running:
+            self._usrp_check_running = True
+            generation = self._usrp_check_generation
+            ip = self.v['ip'].get().strip()
+            # Preserve the last LED state while the next periodic check runs.
+
+            def work():
+                try:
+                    cmd = ['uhd_find_devices']
+                    if ip:
+                        cmd += ['--args', f'addr={ip}']
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+                    output = r.stdout + r.stderr
+                    found = r.returncode == 0 and bool(re.search(
+                        r'(?m)^\s*(?:addr|serial|type):\s*\S+', output))
+                    label = 'USRP: CONNECTED' if found else 'USRP: DISCONNECTED'
+                except (OSError, subprocess.TimeoutExpired):
+                    found, label = False, 'USRP: DISCONNECTED'
+                self.messages.put(('usrp_connection', (generation, found, label)))
+                self.messages.put(('usrp_check_finished', None))
+
+            threading.Thread(target=work, daemon=True).start()
+        self.root.after(5000, self.auto_check_usrp_connection)
+
+    def find_usrp(self):
+        self.set_usrp_connection(False, 'USRP: CHECKING...')
+        generation = self._usrp_check_generation
+        def work():
             try:
-                if sys.platform.startswith("linux"):
-                    subprocess.Popen(["xdg-open", output_dir])
-            except Exception:
-                pass
-
-        proc = None
-
-    threading.Thread(target=monitor, daemon=True).start()
-def clear_output():
-    output.delete("1.0", tk.END)
-
-def find_usrp():
-    append_output("Searching for USRP devices...\n")
-
-    try:
-        result = subprocess.run(
-            ["uhd_find_devices"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-
-    except FileNotFoundError:
-        e312_status.set("● UHD not found")
-        status_label.configure(foreground="red")
-
-        append_output(
-            "Error: uhd_find_devices was not found.\n\n"
-        )
-        return
-
-    except subprocess.TimeoutExpired:
-        e312_status.set("● Search timeout")
-        status_label.configure(foreground="red")
-
-        append_output(
-            "USRP discovery timed out.\n\n"
-        )
-        return
-
-    output_text = result.stdout + result.stderr
-    append_output(output_text + "\n")
-
-    ip_matches = re.findall(
-        r"\baddr:\s*(\d{1,3}(?:\.\d{1,3}){3})",
-        output_text,
-    )
-
-    if not ip_matches:
-        e312_ip.set("")
-        e312_status.set("● No USRP found")
-        status_label.configure(foreground="red")
-
-        append_output(
-            "No USRP IP address was found.\n\n"
-        )
-        return
-
-    detected_ip = ip_matches[0]
-
-    e312_ip.set(detected_ip)
-    e312_status.set("● USRP found")
-    status_label.configure(foreground="orange")
-
-    append_output(
-        f"USRP found at {detected_ip}\n"
-        "Press Test Connection to verify SSH access.\n\n"
-    )
-
-def test_connection():
-    ip = e312_ip.get().strip()
-    user = e312_user.get().strip()
-
-    if not ip:
-        e312_status.set("● Find USRP first")
-        status_label.configure(foreground="red")
-        append_output("No E312 IP address is selected.\n\n")
-        return
-
-    target = f"{user}@{ip}"
-
-    append_output(f"Testing SSH connection to {target}...\n")
-
-    try:
-        result = subprocess.run(
-            [
-                "ssh",
-                "-o", "ConnectTimeout=5",
-                "-o", "BatchMode=yes",
-                target,
-                "echo E312_CONNECTED",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-    except FileNotFoundError:
-        e312_status.set("● SSH not found")
-        status_label.configure(foreground="red")
-        append_output("The ssh command was not found.\n\n")
-        return
-
-    except subprocess.TimeoutExpired:
-        e312_status.set("● Connection timeout")
-        status_label.configure(foreground="red")
-        append_output("SSH connection timed out.\n\n")
-        return
-
-    if (
-        result.returncode == 0
-        and "E312_CONNECTED" in result.stdout
-    ):
-        e312_status.set("● Connected")
-        status_label.configure(foreground="green")
-        append_output(f"Connected successfully to {target}.\n\n")
-
-    else:
-        e312_status.set("● Connection failed")
-        status_label.configure(foreground="red")
-
-        error_text = result.stderr.strip()
-
-        if not error_text:
-            error_text = "Unknown SSH error."
-
-        append_output(
-            f"Could not connect to {target}:\n"
-            f"{error_text}\n\n"
-        )
-def stop_app():
-    global proc
-
-    selected_target = execution_target.get()
-    selected_mode = mode.get()
-
-    # Stop the application on the E312 first
-    if selected_target == "USRP E312":
-        ip = e312_ip.get().strip()
-        user = e312_user.get().strip()
-
-        if not ip or not user:
-            append_output(
-                "\nCannot stop remote application: "
-                "missing E312 connection information.\n"
-            )
-            return
-
-        target = f"{user}@{ip}"
-
-        if selected_mode == "CW":
-            remote_pid_file = REMOTE_CW_PID_FILE
-            app_name = "CW"
-
-        elif selected_mode == "RX to File":
-            remote_pid_file = REMOTE_RX_PID_FILE
-            app_name = "RX-to-File"
-
-
-        elif selected_mode in ("Pulse", "Combined Mode"):
-
-            remote_pid_file = REMOTE_PULSE_PID_FILE
-
-            app_name = selected_mode
-
-        else:
-            remote_pid_file = None
-            app_name = selected_mode
-
-        if remote_pid_file:
-            remote_stop_command = (
-                f"pid=$(cat {shlex.quote(remote_pid_file)} "
-                "2>/dev/null); "
-                'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then '
-                'kill -INT "$pid"; '
-                "fi; "
-                f"rm -f {shlex.quote(remote_pid_file)}"
-            )
-
-            append_output(
-                f"\nStopping {app_name} on {target}...\n"
-            )
-
+                r = subprocess.run(['uhd_find_devices'], capture_output=True,
+                                   text=True, timeout=15)
+                output = r.stdout + r.stderr
+                self.emit(output)
+                match = re.search(r'\baddr:\s*(\d{1,3}(?:\.\d{1,3}){3})', output)
+                found = r.returncode == 0 and bool(re.search(
+                    r'(?m)^\s*(?:addr|serial|type):\s*\S+', output))
+                if match:
+                    self.root.after(0, lambda addr=match.group(1): self.v['ip'].set(addr))
+                self.messages.put(('usrp_connection',
+                    (generation, found, 'USRP: CONNECTED' if found else 'USRP: DISCONNECTED')))
+            except Exception as e:
+                self.messages.put(('usrp_connection', (generation, False, 'USRP: DISCONNECTED')))
+                self.emit(f'Discovery failed: {e}\n')
+        threading.Thread(target=work, daemon=True).start()
+    def test_ssh(self):
+        user=self.v['user'].get().strip();ip=self.v['ip'].get().strip()
+        if not user or not ip:messagebox.showerror('SSH','Enter IP and username');return
+        def work():
             try:
-                result = subprocess.run(
-                    [
-                        "ssh",
-                        "-o", "ConnectTimeout=5",
-                        "-o", "BatchMode=yes",
-                        target,
-                        remote_stop_command,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-
-                if result.stdout:
-                    append_output(result.stdout)
-
-                if result.stderr:
-                    append_output(result.stderr)
-
-            except subprocess.TimeoutExpired:
-                append_output(
-                    "Remote stop command timed out.\n"
-                )
-
-    # Wait for the main SSH/local process to finish
-    if proc is not None:
-        try:
-            proc.wait(timeout=3)
-
-        except subprocess.TimeoutExpired:
-            # Fallback: stop the local process group
+                r=subprocess.run(['ssh','-o','ConnectTimeout=5','-o','BatchMode=yes',f'{user}@{ip}','echo CONNECTED'],capture_output=True,text=True,timeout=10)
+                self.emit(f'SSH test: {r.stdout}{r.stderr}Exit {r.returncode}\n')
+            except Exception as e:self.emit(f'SSH test failed: {e}\n')
+        threading.Thread(target=work,daemon=True).start()
+    def download(self):
+        user=self.v['user'].get().strip();ip=self.v['ip'].get().strip();dest=self.v['output'].get().strip()
+        if not user or not ip or not dest:messagebox.showerror('Download','Enter IP, username and local file');return
+        def work():
             try:
-                os.killpg(
-                    os.getpgid(proc.pid),
-                    signal.SIGINT,
-                )
-            except ProcessLookupError:
-                pass
-
-        proc = None
-
-def download_rx_recording():
-    ip = e312_ip.get().strip()
-    user = e312_user.get().strip()
-    local_file = rx_output.get().strip()
-
-    if not ip:
-        messagebox.showerror(
-            "USRP not found",
-            "Press Find USRP first."
-        )
-        return
-
-    if not local_file:
-        messagebox.showerror(
-            "Missing destination",
-            "Choose a local output file."
-        )
-        return
-
-    target = f"{user}@{ip}"
-
-    local_directory = os.path.dirname(local_file)
-
-    if local_directory:
-        os.makedirs(local_directory, exist_ok=True)
-
-    selected_mode = mode.get()
-
-    if selected_mode == "Combined Mode":
-        remote_file = REMOTE_MEAS_FILE
-    elif selected_mode == "RX to File":
-        remote_file = REMOTE_RX_FILE
-    else:
-        messagebox.showerror(
-            "Invalid mode",
-            "Download is only available for Combined Mode or RX to File."
-        )
-        return
-
-    cmd = [
-        "scp",
-        "-o", "ConnectTimeout=5",
-        f"{target}:{remote_file}",
-        local_file,
-    ]
-
-    append_output(
-        "Downloading recording from E312:\n"
-        + " ".join(cmd)
-        + "\n\n"
-    )
-
-    def download_worker():
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            if result.stdout:
-                append_output(result.stdout)
-
-            if result.stderr:
-                append_output(result.stderr)
-
-            if result.returncode == 0:
-                append_output(
-                    f"Recording downloaded successfully:\n"
-                    f"{local_file}\n\n"
-                )
-            else:
-                append_output(
-                    "Recording download failed.\n\n"
-                )
-
-        except subprocess.TimeoutExpired:
-            append_output(
-                "Recording download timed out.\n\n"
-            )
-
-    threading.Thread(
-        target=download_worker,
-        daemon=True,
-    ).start()
-
-def browse_bitfile():
-    path = filedialog.askopenfilename(
-        title="Select FPGA bitstream",
-        initialdir=os.path.expanduser("/home/nitzanv/bitstreams"),
-        filetypes=[("Bitstream files", "*.bit"), ("All files", "*.*")]
-    )
-
-    if path:
-        bitfile.set(path)
-
-
-def update_fpga():
-    path = bitfile.get().strip()
-
-    if not path:
-        messagebox.showerror("Missing bitstream", "Please select a .bit file first.")
-        return
-
-    if not os.path.exists(path):
-        messagebox.showerror("File not found", f"Bitstream file not found:\n{path}")
-        return
-
-    if proc is not None:
-        messagebox.showwarning(
-            "RFNoC app running",
-            "Stop the RFNoC app before updating the FPGA."
-        )
-        return
-
-    cmd = [
-        "uhd_image_loader",
-        "--args", "type=e3xx",
-        "--fpga-path", path,
-    ]
-
-    append_output("Updating FPGA:\n" + " ".join(cmd) + "\n\n")
-
-    p = subprocess.Popen(
-        cmd,
-        cwd=os.path.dirname(path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
-    threading.Thread(
-        target=read_process_output,
-        args=(p, "FPGA update finished."),
-        daemon=True,
-    ).start()
-
-root = tk.Tk()
-root.title("SDR GUI")
-style = ttk.Style()
-style.configure(".", font=("TkDefaultFont", 10))
-# Left side: controls
-# Right side: plot and terminal
-root.columnconfigure(0, weight=1, minsize=450)
-root.columnconfigure(1, weight=2, minsize=750)
-root.rowconfigure(0, weight=1)
-
-# Scrollable left panel
-left_container = ttk.Frame(root)
-left_container.grid(
-    row=0,
-    column=0,
-    sticky="nsew",
-)
-
-left_container.rowconfigure(0, weight=1)
-left_container.columnconfigure(0, weight=1)
-
-left_canvas = tk.Canvas(
-    left_container,
-    highlightthickness=0,
-)
-
-left_scrollbar = ttk.Scrollbar(
-    left_container,
-    orient="vertical",
-    command=left_canvas.yview,
-)
-
-left_canvas.configure(
-    yscrollcommand=left_scrollbar.set
-)
-
-left_canvas.grid(
-    row=0,
-    column=0,
-    sticky="nsew",
-)
-
-left_scrollbar.grid(
-    row=0,
-    column=1,
-    sticky="ns",
-)
-
-frame = ttk.Frame(
-    left_canvas,
-    padding=10,
-)
-
-left_window = left_canvas.create_window(
-    (0, 0),
-    window=frame,
-    anchor="nw",
-)
-
-frame.columnconfigure(0, weight=1)
-
-def update_left_scroll_region(event=None):
-    left_canvas.configure(
-        scrollregion=left_canvas.bbox("all")
-    )
-
-
-def resize_left_frame(event):
-    left_canvas.itemconfigure(
-        left_window,
-        width=event.width
-    )
-frame.bind(
-    "<Configure>",
-    update_left_scroll_region,
-)
-
-left_canvas.bind(
-    "<Configure>",
-    resize_left_frame,
-)
-
-def scroll_left_panel(event):
-    left_canvas.yview_scroll(
-        int(-1 * (event.delta / 120)),
-        "units",
-    )
-
-
-left_canvas.bind_all(
-    "<MouseWheel>",
-    scroll_left_panel,
-)
-
-left_canvas.bind_all(
-    "<Button-4>",
-    lambda event: left_canvas.yview_scroll(-1, "units"),
-)
-
-left_canvas.bind_all(
-    "<Button-5>",
-    lambda event: left_canvas.yview_scroll(1, "units"),
-)
-
-right_frame = ttk.Frame(root, padding=(0, 10, 10, 10))
-right_frame.grid(
-    row=0,
-    column=1,
-    sticky="nsew",
-)
-
-right_frame.columnconfigure(0, weight=1)
-
-# Plot keeps a compact height.
-# Terminal receives the extra vertical space.
-right_frame.rowconfigure(0, weight=0)
-right_frame.rowconfigure(1, weight=1)
-
-
-# =========================================================
-# Operation mode
-# =========================================================
-mode_frame = ttk.LabelFrame(
-    frame,
-    text="Operation Mode",
-    padding=12
-)
-mode_frame.grid(
-    row=0,
-    column=0,
-    sticky="ew",
-    pady=(0, 10)
-)
-
-mode_frame.columnconfigure(0, weight=1)
-
-mode = tk.StringVar(value="Pulse")
-execution_target = tk.StringVar(value="Host PC")
-save_data = tk.BooleanVar(value=True)
-
-mode_combo = ttk.Combobox(
-    mode_frame,
-    textvariable=mode,
-    values=[
-        "Combined Mode",
-        "Pulse",
-        "CW",
-        "RX to File",
-        "Convert to CSV",
-    ],
-    state="readonly",
-    font=("TkDefaultFont", 14),
-    justify="center",
-)
-mode_combo.grid(
-    row=0,
-    column=0,
-    sticky="ew",
-    padx=5,
-    pady=5,
-)
-ttk.Label(
-    mode_frame,
-    text="Execution Target",
-).grid(
-    row=1,
-    column=0,
-    sticky="w",
-    padx=5,
-    pady=(8, 2),
-)
-
-target_combo = ttk.Combobox(
-    mode_frame,
-    textvariable=execution_target,
-    values=[
-        "Host PC",
-        "USRP E312",
-    ],
-    state="readonly",
-    font=("TkDefaultFont", 12),
-    justify="center",
-)
-
-target_combo.grid(
-    row=2,
-    column=0,
-    sticky="ew",
-    padx=5,
-    pady=(2, 5),
-)
-# =========================================================
-# E312 Connection
-# =========================================================
-e312_frame = ttk.LabelFrame(
-    frame,
-    text="USRP E312",
-    padding=8,
-)
-
-e312_frame.columnconfigure(1, weight=1)
-e312_frame.grid(
-    row=1,
-    column=0,
-    sticky="ew",
-    pady=4,
-)
-
-e312_ip = tk.StringVar(value="")
-e312_user = tk.StringVar(value="root")
-e312_status = tk.StringVar(value="Disconnected")
-ttk.Label(
-    e312_frame,
-    text="IP Address",
-).grid(
-    row=0,
-    column=0,
-    sticky="w",
-)
-
-ttk.Entry(
-    e312_frame,
-    textvariable=e312_ip,
-).grid(
-    row=0,
-    column=1,
-    sticky="ew",
-    padx=5,
-)
-ttk.Label(
-    e312_frame,
-    text="Username",
-).grid(
-    row=1,
-    column=0,
-    sticky="w",
-)
-
-ttk.Entry(
-    e312_frame,
-    textvariable=e312_user,
-).grid(
-    row=1,
-    column=1,
-    sticky="ew",
-    padx=5,
-)
-ttk.Label(
-    e312_frame,
-    text="Status",
-).grid(
-    row=2,
-    column=0,
-    sticky="w",
-)
-
-status_label = ttk.Label(
-    e312_frame,
-    textvariable=e312_status,
-    foreground="red",
-)
-
-status_label.grid(
-    row=2,
-    column=1,
-    sticky="w",
-)
-e312_button_frame = ttk.Frame(e312_frame)
-
-e312_button_frame.grid(
-    row=3,
-    column=0,
-    columnspan=2,
-    pady=5,
-)
-
-ttk.Button(
-    e312_button_frame,
-    text="Find USRP",
-    command=find_usrp,
-).pack(
-    side=tk.LEFT,
-    padx=5,
-)
-
-ttk.Button(
-    e312_button_frame,
-    text="Test Connection",
-    command=test_connection,
-).pack(
-    side=tk.LEFT,
-    padx=5,
-)
-
-# =========================================================
-# Antenna selection
-# =========================================================
-antenna_frame = ttk.LabelFrame(
-    frame,
-    text="Antenna Selection",
-    padding=8,
-)
-
-antenna_frame.grid(
-    row=2,
-    column=0,
-    sticky="ew",
-    pady=4,
-)
-
-antenna_frame.columnconfigure(1, weight=1)
-
-rx_channel = tk.StringVar(value="0")
-tx_channel = tk.StringVar(value="0")
-
-rx_ant = tk.StringVar(value="RX2")
-tx_ant = tk.StringVar(value="TX/RX")
-
-ttk.Label(
-    antenna_frame,
-    text="RX port",
-).grid(
-    row=0,
-    column=0,
-    sticky="w",
-    padx=4,
-    pady=3,
-)
-
-rx_port_combo = ttk.Combobox(
-    antenna_frame,
-    values=[
-        "TRX-A",
-        "RX2-A",
-        "TRX-B",
-        "RX2-B",
-    ],
-    state="readonly",
-)
-
-rx_port_combo.set("RX2-A")
-
-rx_port_combo.grid(
-    row=0,
-    column=1,
-    sticky="ew",
-    padx=4,
-    pady=3,
-)
-
-ttk.Label(
-    antenna_frame,
-    text="TX port",
-).grid(
-    row=1,
-    column=0,
-    sticky="w",
-    padx=4,
-    pady=3,
-)
-
-tx_port_combo = ttk.Combobox(
-    antenna_frame,
-    values=[
-        "TRX-A",
-        "TRX-B",
-    ],
-    state="readonly",
-)
-
-tx_port_combo.set("TRX-A")
-
-tx_port_combo.grid(
-    row=1,
-    column=1,
-    sticky="ew",
-    padx=4,
-    pady=3,
-)
-# =========================================================
-# RX parameters
-# =========================================================
-rx_frame = ttk.LabelFrame(
-    frame,
-    text="RX Parameters",
-    padding=8
-)
-rx_frame.grid(
-    row=3,
-    column=0,
-    sticky="ew",
-    pady=4
-)
-
-rx_frame.columnconfigure(1, weight=1)
-
-rx_freq = add_field(rx_frame, 0, "RX freq [MHz]", "200")
-rx_gain = add_field(rx_frame, 1, "RX gain [dB]", "10")
-rx_bw = add_field(rx_frame, 2, "RX BW [MHz]", "1")
-threshold = add_field(rx_frame, 3, "Threshold [dBFS]", "-30")
-
-# =========================================================
-# TX parameters
-# =========================================================
-tx_frame = ttk.LabelFrame(
-    frame,
-    text="TX Parameters",
-    padding=8
-)
-tx_frame.grid(
-    row=4,
-    column=0,
-    sticky="ew",
-    pady=4
-)
-
-tx_frame.columnconfigure(1, weight=1)
-
-tx_freq = add_field(tx_frame, 0, "TX freq [MHz]", "200")
-tx_gain = add_field(tx_frame, 1, "TX gain [dB]", "70")
-tx_bw = add_field(tx_frame, 2, "TX BW [MHz]", "1")
-
-
-# =========================================================
-# Sampling parameters
-# =========================================================
-sampling_frame = ttk.LabelFrame(
-    frame,
-    text="Sampling Parameters",
-    padding=8
-)
-sampling_frame.grid(
-    row=5,
-    column=0,
-    sticky="ew",
-    pady=4
-)
-
-sampling_frame.columnconfigure(1, weight=1)
-
-rate = add_field(sampling_frame, 0, "Rate [MSPS]", "60")
-spp = add_field(sampling_frame, 1, "SPP", "64")
-
-rate_note = ttk.Label(
-    sampling_frame,
-    text="Recommended rate for Pulse mode: 60 MSPS",
-    foreground="#0066CC",
-)
-rate_note.grid(
-    row=2,
-    column=0,
-    columnspan=2,
-    sticky="w",
-    padx=4,
-    pady=(2, 4),
-)
-
-
-# =========================================================
-# Pulse parameters
-# =========================================================
-pulse_frame = ttk.LabelFrame(
-    frame,
-    text="Pulse Parameters",
-    padding=8
-)
-pulse_frame.grid(
-    row=6,
-    column=0,
-    sticky="ew",
-    pady=4
-)
-
-pulse_frame.columnconfigure(1, weight=1)
-
-
-avg_delay = add_field(
-    pulse_frame,
-    0,
-    "Avg start delay [samples]",
-    "32"
-)
-
-delay = add_field(
-    pulse_frame,
-    1,
-    "Delay [us]",
-    "100"
-)
-
-pulsewidth = add_field(
-    pulse_frame,
-    2,
-    "Pulse width [us]",
-    "10"
-)
-pulse_gap = add_field(
-    pulse_frame,
-    3,
-    "Pulse gap [us]",
-    "100"
-)
-
-# =========================================================
-# File parameters
-# =========================================================
-file_frame = ttk.LabelFrame(
-    frame,
-    text="RX Output File",
-    padding=8
-)
-file_frame.grid(
-    row=7,
-    column=0,
-    sticky="ew",
-    pady=4
-)
-
-file_frame.columnconfigure(1, weight=1)
-
-rx_output = add_field(
-    file_frame,
-    0,
-    "File path",
-    os.path.expanduser(
-        "~/workarea/uhd/work/build/usrp_samples.dat"
-    ),
-)
-
-save_data_cb = ttk.Checkbutton(
-    file_frame,
-    text="Save trigger measurements",
-    variable=save_data,
-)
-
-save_data_cb.grid(
-    row=1,
-    column=0,
-    columnspan=2,
-    sticky="w",
-    padx=4,
-    pady=3,
-)
-
-browse_output_button = ttk.Button(
-    file_frame,
-    text="Choose output file",
-    command=browse_output_file,
-)
-browse_output_button.grid(
-    row=2,
-    column=0,
-    columnspan=2,
-    pady=5,
-)
-download_rx_button = ttk.Button(
-    file_frame,
-    text="Download from E312",
-    command=download_rx_recording,
-)
-
-download_rx_button.grid(
-    row=3,
-    column=0,
-    columnspan=2,
-    pady=5,
-)
-
-# =========================================================
-# FPGA configuration
-# =========================================================
-fpga_frame = ttk.LabelFrame(
-    frame,
-    text="FPGA Configuration",
-    padding=8
-)
-fpga_frame.grid(
-    row=8,
-    column=0,
-    sticky="ew",
-    pady=4
-)
-
-fpga_frame.columnconfigure(1, weight=1)
-
-bitfile = add_field(
-    fpga_frame,
-    0,
-    "FPGA bitfile",
-    "./e31x.bit"
-)
-
-ttk.Label(
-    fpga_frame,
-    text="Select Fixed/Relative Power bitfile",
-    foreground="#0066CC",
-).grid(
-    row=1,
-    column=0,
-    columnspan=2,
-    sticky="w",
-    padx=4,
-    pady=3,
-)
-
-fpga_button_frame = ttk.Frame(fpga_frame)
-fpga_button_frame.grid(
-    row=2,
-    column=0,
-    columnspan=2,
-    pady=5,
-)
-
-ttk.Button(
-    fpga_button_frame,
-    text="Browse bitfile",
-    command=browse_bitfile,
-).pack(
-    side=tk.LEFT,
-    padx=5,
-)
-
-ttk.Button(
-    fpga_button_frame,
-    text="Update FPGA",
-    command=update_fpga,
-).pack(
-    side=tk.LEFT,
-    padx=5,
-)
-
-
-# =========================================================
-# Main controls
-# =========================================================
-button_frame = ttk.Frame(frame)
-button_frame.grid(
-    row=9,
-    column=0,
-    sticky="ew",
-    pady=10,
-)
-
-button_frame.columnconfigure((0, 1, 2), weight=1)
-
-ttk.Button(
-    button_frame,
-    text="Start",
-    command=start_app,
-).grid(
-    row=0,
-    column=0,
-    padx=5,
-    sticky="ew",
-)
-
-ttk.Button(
-    button_frame,
-    text="Stop",
-    command=stop_app,
-).grid(
-    row=0,
-    column=1,
-    padx=5,
-    sticky="ew",
-)
-
-ttk.Button(
-    button_frame,
-    text="Clear Log",
-    command=clear_output,
-).grid(
-    row=0,
-    column=2,
-    padx=5,
-    sticky="ew",
-)
-
-
-# Update visible sections whenever the mode changes
-mode.trace_add("write", update_fields_for_mode)
-execution_target.trace_add("write", update_fields_for_mode)
-save_data.trace_add("write", update_fields_for_mode)
-
-update_fields_for_mode()
-
-
-# =========================================================
-# Plot - upper right
-# =========================================================
-plot_frame = ttk.LabelFrame(
-    right_frame,
-    text="RX/TX Amplitude Tracking",
-    padding=5,
-)
-plot_frame.grid(
-    row=0,
-    column=0,
-    sticky="ew",
-    pady=(0, 8),
-)
-
-plot_frame.columnconfigure(0, weight=1)
-
-fig1 = Figure(figsize=(7, 4), dpi=100)
-ax = fig1.add_subplot(111)
-
-ax.set_xlabel("Time [s]")
-ax.set_ylabel("dBFS")
-ax.grid(True)
-
-canvas1 = FigureCanvasTkAgg(
-    fig1,
-    master=plot_frame,
-)
-
-canvas1.get_tk_widget().grid(
-    row=0,
-    column=0,
-    sticky="ew",
-)
-
-
-# =========================================================
-# Terminal - lower right
-# =========================================================
-log_frame = ttk.LabelFrame(
-    right_frame,
-    text="Application Log",
-    padding=5,
-)
-log_frame.grid(
-    row=1,
-    column=0,
-    sticky="nsew",
-)
-
-log_frame.columnconfigure(0, weight=1)
-log_frame.rowconfigure(0, weight=1)
-
-output = tk.Text(
-    log_frame,
-    width=75,
-    height=20,
-    wrap="none",
-)
-
-output.grid(
-    row=0,
-    column=0,
-    sticky="nsew",
-)
-
-
-root.protocol("WM_DELETE_WINDOW", lambda: (stop_app(), root.destroy()))
-
-root.mainloop()
+                os.makedirs(os.path.dirname(os.path.abspath(dest)),exist_ok=True)
+                r=subprocess.run(['scp','-o','ConnectTimeout=5',f'{user}@{ip}:{REMOTE_FILE}',dest],capture_output=True,text=True,timeout=120)
+                self.emit(f'Download exit {r.returncode}: {r.stdout}{r.stderr}\n')
+            except Exception as e:self.emit(f'Download failed: {e}\n')
+        threading.Thread(target=work,daemon=True).start()
+    def update_fpga(self):
+        path=self.v['bitfile'].get().strip()
+        if self.proc and self.proc.poll() is None:messagebox.showerror('FPGA','Stop acquisition first');return
+        if not os.path.isfile(path):messagebox.showerror('FPGA','Bitstream not found');return
+        if not messagebox.askyesno('FPGA update','Load selected bitstream using uhd_image_loader?'):return
+        self.run_command(['uhd_image_loader','--args','type=e3xx','--fpga-path',os.path.abspath(path)],cwd=WORKDIR)
+    def parse_file(self):
+        src=self.parser_in.get().strip();dest=self.parser_out.get().strip()
+        if not src or not dest:messagebox.showerror('Parser','Select input and output files');return
+        if os.path.abspath(src)==os.path.abspath(dest):messagebox.showerror('Parser','Input and output must differ');return
+        self.parse_status.set('Converting...')
+        def work():
+            try:
+                n=convert(src,dest)
+                self.messages.put(('parse',f'Success: {n} pulse records written to {dest}'))
+            except Exception as e:self.messages.put(('parse',f'Error: {e}'))
+        threading.Thread(target=work,daemon=True).start()
+    def close(self):
+        if self.proc and self.proc.poll() is None:
+            if not messagebox.askyesno('Exit','Acquisition is running. Stop and exit?'):return
+            self.stop()
+        self.root.destroy()
+
+if __name__=='__main__':
+    root=tk.Tk();CombinedGUI(root);root.mainloop()

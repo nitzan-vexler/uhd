@@ -182,6 +182,95 @@ module rfnoc_block_siggen_tb #(
   );
 
 
+  // --------------------------------------------------------------------------
+  // RFNoC input metadata monitor (observes the actual NoC shell output)
+  // --------------------------------------------------------------------------
+  bit timestamp_probe_active = 0;
+  int unsigned timestamp_probe_samples = 0;
+  int unsigned timestamp_probe_packets = 0;
+  int unsigned timestamp_probe_timed_samples = 0;
+  bit timestamp_probe_first = 1;
+  // Enable strict timestamp checks only for the timestamped-CHDR test.
+  bit timestamp_check_active = 0;
+  int unsigned timestamp_packet_sample_count = 0;
+
+
+  always @(posedge ce_clk) begin
+    if (dut.ce_rst) begin
+      timestamp_probe_first = 1;
+    end else if (timestamp_probe_active &&
+                 dut.s_in_axis_tvalid[0] && dut.s_in_axis_tready[0]) begin
+      timestamp_probe_samples++;
+      if (timestamp_check_active) begin
+        // The BFM sends exactly two 64-sample timed packets.
+        `ASSERT_ERROR(timestamp_probe_packets < 2,
+                      "Received an unexpected third timed packet");
+        `ASSERT_ERROR(dut.s_in_axis_thas_time[0] === 1'b1,
+                      "CHDR timestamp-valid bit was not propagated");
+        if (timestamp_probe_packets == 0) begin
+          `ASSERT_ERROR(dut.s_in_axis_ttimestamp[63:0] === 64'd100000,
+                        "First packet timestamp is not 100000");
+        end else begin
+          `ASSERT_ERROR(dut.s_in_axis_ttimestamp[63:0] === 64'd200000,
+                        "Second packet timestamp is not 200000");
+        end
+        timestamp_packet_sample_count++;
+        `ASSERT_ERROR(timestamp_packet_sample_count <= 64,
+                      "Timed packet contained more than 64 samples");
+        `ASSERT_ERROR(dut.s_in_axis_tlast[0] ===
+                      (timestamp_packet_sample_count == 64),
+                      "Timed packet TLAST does not match 64 samples");
+      end
+      if (dut.s_in_axis_thas_time[0])
+        timestamp_probe_timed_samples++;
+      if (timestamp_probe_first || dut.s_in_axis_tlast[0]) begin
+        $display("RFNOC_TS sample=%0d first=%0b last=%0b has_time=%0b timestamp=%0d data=%08h",
+                 timestamp_probe_samples-1, timestamp_probe_first,
+                 dut.s_in_axis_tlast[0], dut.s_in_axis_thas_time[0],
+                 dut.s_in_axis_ttimestamp[63:0], dut.s_in_axis_tdata[31:0]);
+      end
+      if (dut.s_in_axis_tlast[0]) begin
+        if (timestamp_check_active) timestamp_packet_sample_count = 0;
+        timestamp_probe_packets++;
+        timestamp_probe_first = 1;
+      end else begin
+        timestamp_probe_first = 0;
+      end
+    end
+  end
+
+  // Checks that input packet metadata reaches the SIGGEN core boundary.
+  // NOTE: send_items() in this testbench does not explicitly set CHDR timestamps.
+  // A separate timed-CHDR stimulus is required to verify actual timestamp values.
+  task automatic test_rfnoc_timestamp_path(int port_in = 0, int port_out = 0);
+    item_t tx[$];
+    test.start_test("RFNoC timestamp path visibility", 2ms);
+    write_reg(port_out, REG_ENABLE, 0);
+    write_reg(port_out, REG_THRESHOLD, 16'd500);
+    tx.delete();
+    repeat (128) tx.push_back(pack_iq(16'sd100, 16'sd0));
+
+    timestamp_probe_samples = 0;
+    timestamp_probe_packets = 0;
+    timestamp_probe_timed_samples = 0;
+    timestamp_probe_first = 1;
+    timestamp_probe_active = 1;
+    blk_ctrl.send_items(port_in, tx);
+    #(CE_CLK_PER * 2000);
+    timestamp_probe_active = 0;
+
+    $display("RFNOC_TS SUMMARY: samples=%0d packets=%0d timed_samples=%0d",
+             timestamp_probe_samples, timestamp_probe_packets,
+             timestamp_probe_timed_samples);
+    `ASSERT_ERROR(timestamp_probe_samples == 128,
+                  "RFNoC shell did not deliver all 128 samples");
+    `ASSERT_ERROR(timestamp_probe_packets > 0,
+                  "RFNoC shell did not deliver a complete packet");
+    if (timestamp_probe_timed_samples == 0)
+      $display("RFNOC_TS NOTE: No valid timestamps observed. Untimed BFM stimulus cannot validate timestamp reconstruction.");
+    test.end_test();
+  endtask
+
   //---------------------------------------------------------------------------
   // Helper Tasks
   //---------------------------------------------------------------------------
@@ -932,6 +1021,62 @@ for (i = 0; i < 300; i++)
 endtask
 
 
+task automatic test_rfnoc_hw_timestamp(
+    int port_in = 0,
+    int port_out = 0
+);
+    item_t tx[$];
+    packet_info_t pkt_info;
+    int unsigned wait_cycles;
+
+    test.start_test("RFNoC hardware timestamp test", 1ms);
+
+    // Keep the core disabled: this test observes the RX NoC shell metadata.
+    write_reg(port_out, REG_ENABLE, 0);
+
+    timestamp_probe_samples = 0;
+    timestamp_probe_packets = 0;
+    timestamp_probe_timed_samples = 0;
+    timestamp_probe_first = 1;
+    timestamp_packet_sample_count = 0;
+    timestamp_check_active = 1;
+    timestamp_probe_active = 1;
+
+    tx.delete();
+    repeat (64) tx.push_back(pack_iq(16'sd100, 16'sd0));
+
+    pkt_info = '0;
+    pkt_info.has_time = 1'b1;
+    pkt_info.timestamp = 64'd100000;
+    blk_ctrl.send_items(port_in, tx, {}, pkt_info);
+
+    pkt_info = '0;
+    pkt_info.has_time = 1'b1;
+    pkt_info.timestamp = 64'd200000;
+    blk_ctrl.send_items(port_in, tx, {}, pkt_info);
+
+    // Wait for both complete packets, with a bounded timeout.
+    wait_cycles = 0;
+    while ((timestamp_probe_packets < 2) && (wait_cycles < 10000)) begin
+        @(negedge ce_clk);
+        wait_cycles++;
+    end
+    // Allow the final posedge monitor to finish before disabling checks.
+    timestamp_probe_active = 0;
+    timestamp_check_active = 0;
+
+    $display("RFNOC_HW_TS SUMMARY: samples=%0d packets=%0d timed_samples=%0d",
+             timestamp_probe_samples, timestamp_probe_packets,
+             timestamp_probe_timed_samples);
+    `ASSERT_ERROR(timestamp_probe_packets == 2,
+                  "Timed CHDR test did not receive exactly two packets");
+    `ASSERT_ERROR(timestamp_probe_samples == 128,
+                  "Timed CHDR test did not receive exactly 128 samples");
+    `ASSERT_ERROR(timestamp_probe_timed_samples == 128,
+                  "Timed CHDR test did not mark all samples as timed");
+    test.end_test();
+endtask
+
 
 
 
@@ -941,6 +1086,7 @@ task automatic test_registers(int port);
   logic [31:0] dbg_tx_amp_rb;
 
   test.start_test($sformatf("Test registers (port %0d)", port), 1ms);
+  write_reg(port, REG_THRESHOLD, 32'd0);
 
   test_read_write_reg(port, REG_SPP,       {REG_SPP_LEN{1'b1}},       32'd16);
   test_read_write_reg(port, REG_GAIN,      {REG_GAIN_LEN{1'b1}},      32'h7FFF);
@@ -1056,7 +1202,6 @@ task automatic test_measurement_fifo(
     logic [31:0] power0;
     logic [31:0] power1;
     logic [31:0] power2;
-    logic [31:0] meta_rb;
 logic [31:0] time_rb;
 logic [31:0] valid_rb;
 
@@ -1831,6 +1976,124 @@ read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
 
 endtask
 
+
+  // -------------------------------------------------------------------------
+  // Verify that the FIFO retains the timestamp of the triggering CHDR packet
+  // and the zero-based sample offset of the threshold crossing.
+  // -------------------------------------------------------------------------
+  task automatic test_chdr_trigger_fifo(int port_in = 0, int port_out = 0);
+    item_t tx[$];
+    packet_info_t pkt_info;
+    logic [31:0] count_rb, valid_rb, meta_rb, lo_rb, hi_rb;
+    logic [31:0] offset_rb, status_rb, power_rb, meta_again;
+    logic [63:0] timestamp_rb;
+    logic [15:0] seq_rb;
+    int unsigned guard;
+    localparam logic [63:0] TEST_TS = 64'h1234_5678_9ABC_DEF0;
+    localparam int TRIGGER_OFFSET = 16;
+
+    test.start_test("CHDR timestamp + trigger offset FIFO", 5ms);
+    write_reg(port_out, REG_ENABLE, 0);
+    write_reg(port_out, REG_THRESHOLD, 0);
+    flush_output(port_out);
+
+    // Remove measurements from earlier tests (FWFT FIFO).
+    read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+    guard = 0;
+    while ((count_rb != 0) && (guard < 2048)) begin
+      write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+      #(CE_CLK_PER * 8);
+      read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+      guard++;
+    end
+    `ASSERT_FATAL(count_rb == 0, "Could not drain measurement FIFO");
+
+    write_reg(port_out, REG_SPP, 64);
+    write_reg(port_out, REG_GAIN, 16'h7FFF);
+    write_reg(port_out, REG_AVG_START_DELAY, 0);
+    write_reg(port_out, REG_PULSEWIDTH, 16);
+    write_reg(port_out, REG_DELAY, 0);
+    write_reg(port_out, REG_PULSE_GAP, 20);
+    write_reg(port_out, REG_THRESHOLD, 500);
+    write_reg(port_out, REG_ENABLE, 1);
+
+    // Exactly 64 samples in the first timed packet.
+    // Samples 0..15 are below threshold; sample 16 crosses it.
+    tx.delete();
+    repeat (TRIGGER_OFFSET) tx.push_back(pack_iq(16'sd100, 16'sd0));
+    repeat (64-TRIGGER_OFFSET) tx.push_back(pack_iq(16'sd4000, 16'sd0));
+    pkt_info = '0;
+    pkt_info.has_time = 1'b1;
+    pkt_info.timestamp = TEST_TS;
+    blk_ctrl.send_items(port_in, tx, {}, pkt_info);
+
+    // Keep the input above threshold long enough for the 128-sample
+    // averaging window. This is a second timed packet, but it must not
+    // replace the triggering packet's timestamp.
+    tx.delete();
+    repeat (64) tx.push_back(pack_iq(16'sd4000, 16'sd0));
+    pkt_info = '0;
+    pkt_info.has_time = 1'b1;
+    pkt_info.timestamp = TEST_TS + 64'd64;
+    blk_ctrl.send_items(port_in, tx, {}, pkt_info);
+
+    tx.delete();
+    repeat (64) tx.push_back(pack_iq(16'sd4000, 16'sd0));
+    pkt_info.timestamp = TEST_TS + 64'd128;
+    blk_ctrl.send_items(port_in, tx, {}, pkt_info);
+
+    // Wait for measurement push (not merely for the trigger edge).
+    guard = 0;
+    count_rb = 0;
+    while ((count_rb == 0) && (guard < 200)) begin
+      #(CE_CLK_PER * 100);
+      read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+      guard++;
+    end
+    `ASSERT_FATAL(count_rb == 1, "Expected one CHDR-triggered measurement");
+
+    read_reg(port_out, REG_MEAS_FIFO_VALID, valid_rb);
+    read_reg(port_out, REG_MEAS_FIFO_META, meta_rb);
+    read_reg(port_out, REG_MEAS_FIFO_TIME_LO, lo_rb);
+    read_reg(port_out, REG_MEAS_FIFO_TIME_HI, hi_rb);
+    read_reg(port_out, REG_MEAS_FIFO_OFFSET, offset_rb);
+    read_reg(port_out, REG_MEAS_FIFO_STATUS, status_rb);
+    read_reg(port_out, REG_MEAS_FIFO_AVG_POWER, power_rb);
+
+    seq_rb = meta_rb[31:16];
+    timestamp_rb = {hi_rb[15:0], meta_rb[15:0], lo_rb};
+
+    $display("CHDR_FIFO: seq=%0d packet_ts=0x%016h offset=%0d valid=%0b avg_power=%0d",
+             seq_rb, timestamp_rb, offset_rb, status_rb[0], power_rb);
+
+    `ASSERT_ERROR(timestamp_rb === TEST_TS,
+                  "FIFO did not preserve triggering CHDR packet timestamp");
+    `ASSERT_ERROR(offset_rb === TRIGGER_OFFSET,
+                  "Trigger offset is not 16 (possible off-by-one)");
+    `ASSERT_ERROR(status_rb[0] === 1'b1,
+                  "Trigger timestamp validity was lost");
+    `ASSERT_ERROR(power_rb == 32'd16000000,
+                  "Unexpected 128-sample average power");
+
+    // Readback must not pop the FWFT FIFO.
+    read_reg(port_out, REG_MEAS_FIFO_META, meta_again);
+    `ASSERT_ERROR(meta_again === meta_rb, "FIFO data changed without POP");
+    read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+    `ASSERT_ERROR(count_rb == 1, "FIFO read unexpectedly popped measurement");
+
+    write_reg(port_out, REG_MEAS_FIFO_POP, 32'd1);
+    #(CE_CLK_PER * 8);
+    read_reg(port_out, REG_MEAS_FIFO_COUNT, count_rb);
+    `ASSERT_ERROR(count_rb == 0, "FIFO POP did not remove measurement");
+    read_reg(port_out, REG_MEAS_FIFO_VALID, valid_rb);
+    `ASSERT_ERROR(valid_rb[0] == 1'b0, "FIFO VALID remains set after POP");
+
+    write_reg(port_out, REG_ENABLE, 0);
+    flush_output(port_out);
+    test.end_test();
+  endtask
+
+
   //---------------------------------------------------------------------------
   // Main Test Process
   //---------------------------------------------------------------------------
@@ -1876,6 +2139,8 @@ endtask
     // Test Sequences
     //--------------------------------
 
+    test_rfnoc_timestamp_path(0, 0);
+
     // Run basic test all ports
     for(port = 0; port < NUM_PORTS; port++) begin
       test_registers(port);
@@ -1894,6 +2159,8 @@ endtask
     test_measurement_fifo(0, 0);
 
     test_pulse_timestamp(0, 0);
+    test_rfnoc_hw_timestamp(0, 0);
+    test_chdr_trigger_fifo(0, 0);
     // NEW
     // Measure the pipeline latency for port 0
     measure_pipeline_latency(0);

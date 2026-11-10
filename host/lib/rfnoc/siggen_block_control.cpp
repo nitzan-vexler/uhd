@@ -57,6 +57,9 @@ const uint32_t
 
 const uint32_t
     siggen_block_control::REG_MEAS_FIFO_POP_OFFSET = 0x58;
+const uint32_t siggen_block_control::REG_MEAS_FIFO_TIME_HI_OFFSET = 0x60;
+const uint32_t siggen_block_control::REG_MEAS_FIFO_OFFSET_OFFSET  = 0x64;
+const uint32_t siggen_block_control::REG_MEAS_FIFO_STATUS_OFFSET  = 0x68;
     
 // User property names
 const char* const PROP_KEY_ENABLE         = "enable";
@@ -263,31 +266,33 @@ bool pop_measurement_fifo(
         return false;
     }
 
-    // Read the current prefetched measurement.
+    // Read the current FWFT entry. Reads do not pop the FIFO.
     const uint32_t meta =
-        _siggen_reg_iface.peek32(
-            REG_MEAS_FIFO_META_OFFSET,
-            port);
-
+        _siggen_reg_iface.peek32(REG_MEAS_FIFO_META_OFFSET, port);
     const uint32_t time_lo =
-        _siggen_reg_iface.peek32(
-            REG_MEAS_FIFO_TIME_LO_OFFSET,
-            port);
-
+        _siggen_reg_iface.peek32(REG_MEAS_FIFO_TIME_LO_OFFSET, port);
+    const uint32_t time_hi =
+        _siggen_reg_iface.peek32(REG_MEAS_FIFO_TIME_HI_OFFSET, port);
+    const uint32_t offset =
+        _siggen_reg_iface.peek32(REG_MEAS_FIFO_OFFSET_OFFSET, port);
+    const uint32_t status =
+        _siggen_reg_iface.peek32(REG_MEAS_FIFO_STATUS_OFFSET, port);
     const uint32_t avg_power =
-        _siggen_reg_iface.peek32(
-            REG_MEAS_FIFO_AVG_POWER_OFFSET,
-            port);
+        _siggen_reg_iface.peek32(REG_MEAS_FIFO_AVG_POWER_OFFSET, port);
 
-    // Reconstruct measurement.
-    result.sequence =
-        static_cast<uint16_t>(meta >> 16);
-
-    result.sample_index =
-        (uint64_t(meta & 0xFFFF) << 32)
+    // FIFO layout: [159:128] power, [127:112] sequence,
+    // [111:48] packet timestamp, [47:16] sample offset, [15:0] status.
+    result.sequence = static_cast<uint16_t>(meta >> 16);
+    result.packet_timestamp =
+        (uint64_t(time_hi & 0xFFFFu) << 48)
+        | (uint64_t(meta & 0xFFFFu) << 32)
         | uint64_t(time_lo);
-
+    result.sample_offset = offset;
+    result.has_time = (status & 0x1u) != 0;
     result.avg_power = avg_power;
+    // Compatibility only: old clients must not interpret this as
+    // an absolute sample counter.
+    result.sample_index = result.packet_timestamp & 0x0000FFFFFFFFFFFFULL;
 
     // Explicitly remove this entry from the FIFO.
     _siggen_reg_iface.poke32(
@@ -330,6 +335,12 @@ bool get_latest_pulse_measurement(
         }
 
         result.sequence = seq2;
+        // The legacy snapshot registers expose only 48 timestamp bits;
+        // use pop_measurement_fifo() for complete CHDR metadata.
+        result.packet_timestamp = 0;
+        result.sample_offset = 0;
+        result.has_time = false;
+        result.avg_power = 0;
 
         result.sample_index =
             (uint64_t(meta2 & 0xFFFF) << 32)

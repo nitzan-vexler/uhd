@@ -34,6 +34,10 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <cstdint>
+#include <cstdlib>
+#include <stdexcept>
+#include <uhd/types/time_spec.hpp>
 
 namespace po = boost::program_options;
 using uhd::rfnoc::radio_control;
@@ -43,6 +47,7 @@ using gps_data_t =
     std::tuple<std::string, std::string, std::string, std::string>;
 
 std::mutex gps_mutex;
+std::chrono::steady_clock::time_point latest_gps_received{};
 
 gps_data_t latest_gps_data{
     "No GPS Time",
@@ -108,7 +113,7 @@ void gps_stream_thread()
 {
     std::cout << "[GPS] Starting gpspipe..." << std::endl;
 
-    // This application runs directly on the E312
+    // GPSD must be running locally; gpspipe is its JSON client.
     FILE* pipe = popen("gpspipe -w", "r");
 
     if (pipe == nullptr) {
@@ -133,6 +138,7 @@ void gps_stream_thread()
         if (std::get<0>(parsed) != "No GPS Time") {
             std::lock_guard<std::mutex> lock(gps_mutex);
             latest_gps_data = parsed;
+            latest_gps_received = std::chrono::steady_clock::now();
         }
     }
 
@@ -145,11 +151,81 @@ void gps_stream_thread()
 gps_data_t get_latest_gps_data()
 {
     std::lock_guard<std::mutex> lock(gps_mutex);
+    // Reject stale fixes, including fixes from before the receiver started.
+    if (latest_gps_received.time_since_epoch().count() == 0 ||
+        std::chrono::steady_clock::now() - latest_gps_received >
+            std::chrono::seconds(3)) {
+        return {"No GPS Time", "No Latitude", "No Longitude", "No Altitude"};
+    }
     return latest_gps_data;
 }
 
 
 
+
+// Align the RFNoC timekeeper to GPS UTC at a PPS edge.
+// Fail closed: never label device timestamps UTC without verification.
+void synchronize_timekeeper_to_gps(const uhd::rfnoc::mb_controller::sptr& mb)
+{
+    auto tk = mb->get_timekeeper(0);
+    std::cout << "[GPS-SYNC] Waiting for GPS timing lock..." << std::endl;
+    bool locked = false;
+    for (int i = 0; i < 90; ++i) {
+        if (mb->get_sensor("gps_locked").to_bool()) {
+            locked = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    if (!locked) throw std::runtime_error("GPS timing lock timeout (gps_locked=false)");
+
+    // Observe an actual PPS boundary, rather than guessing its phase.
+    auto old_pps = tk->get_ticks_last_pps();
+    bool edge = false;
+    for (int i = 0; i < 250; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto new_pps = tk->get_ticks_last_pps();
+        if (new_pps != old_pps) { edge = true; break; }
+    }
+    if (!edge) throw std::runtime_error("No PPS edges observed by RFNoC timekeeper");
+
+    // Read receiver UTC second immediately after the detected edge.
+    // Device firmware may report the prior second; verification below detects this.
+    const int64_t gps_at_edge = static_cast<int64_t>(
+        mb->get_sensor("gps_time").to_int());
+    if (gps_at_edge < 1600000000LL)
+        throw std::runtime_error("GPS UTC seconds invalid");
+
+    const int64_t programmed_next_second = gps_at_edge + 1;
+    tk->set_time_next_pps(uhd::time_spec_t(programmed_next_second));
+    std::cout << "[GPS-SYNC] Programming next PPS UTC="
+              << programmed_next_second << std::endl;
+
+    // Wait for the programmed edge and verify integer seconds at that edge.
+    old_pps = tk->get_ticks_last_pps();
+    edge = false;
+    for (int i = 0; i < 250; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto new_pps = tk->get_ticks_last_pps();
+        if (new_pps != old_pps) { edge = true; break; }
+    }
+    if (!edge) throw std::runtime_error("No PPS after GPS time programming");
+
+    const double pps_utc = tk->get_time_last_pps().get_real_secs();
+    const int64_t gps_after = static_cast<int64_t>(
+        mb->get_sensor("gps_time").to_int());
+    std::cout << "[GPS-SYNC] PPS device UTC=" << std::fixed
+              << std::setprecision(0) << pps_utc
+              << " GPS sensor UTC=" << gps_after << std::endl;
+    if (std::llabs(static_cast<int64_t>(std::llround(pps_utc))
+                   - programmed_next_second) != 0)
+        throw std::runtime_error("PPS programming did not take effect");
+    if (std::llabs(static_cast<int64_t>(std::llround(pps_utc))
+                   - gps_after) != 0)
+        throw std::runtime_error("GPS/PPS seconds mismatch; UTC alignment NOT verified");
+    std::cout << "[GPS-SYNC] VERIFIED: device timestamps are GPS-aligned UTC"
+              << std::endl;
+}
 
 /****************************************************************************
  * SIGINT handling
@@ -340,8 +416,7 @@ std::cout << "avg_start_delay = "
           << " samples"
           << std::endl;
           
-// Finally enable the generator
-siggen->set_enable(true, port);
+// Enable the generator only after GPS/PPS synchronization, before streaming.
 
     size_t rx_mb_idx = rx_radio_ctrl_id.get_device_no();
 
@@ -364,7 +439,7 @@ siggen->set_enable(true, port);
 
     rx_radio_ctrl->enable_rx_timestamps(rx_timestamps, rx_chan);
     
-    //auto tk = graph->get_mb_controller(rx_mb_idx)->get_timekeeper(rx_mb_idx);
+    //auto tk = graph->get_mb_controller(rx_mb_idx)->get_timekeeper(0);
 //std::cout << "Time now (radio) = " 
      //     << rx_radio_ctrl->get_time_now().get_real_secs() << " s\n";
 //std::cout << "Timekeeper tick rate = " << tk->get_tick_rate() << " Hz\n";
@@ -385,6 +460,21 @@ siggen->set_enable(true, port);
         for (size_t i = 0; i < graph->get_num_mboards(); ++i) {
             graph->get_mb_controller(i)->set_time_source(pps);
         }
+    }
+
+    // GPS position (--gps) also requires GPS/PPS UTC synchronization.
+    // The E310 SG3 probe reports clock sources: internal; time sources: gpsdo.
+    // Keep the internal clock source, select GPSDO as the time/PPS source.
+    if (enable_gps) {
+        if (vm.count("pps") && pps != "gpsdo") {
+            throw std::runtime_error("--gps requires --pps gpsdo (or omit --pps)");
+        }
+        if (vm.count("ref") && ref != "internal") {
+            throw std::runtime_error("E310 SG3 GPS mode requires --ref internal (or omit --ref)");
+        }
+        auto mb = graph->get_mb_controller(rx_mb_idx);
+        mb->set_time_source("gpsdo");
+        synchronize_timekeeper_to_gps(mb);
     }
 
     // set the sample rate
@@ -505,6 +595,8 @@ siggen->set_enable(true, port);
                   << std::endl;
     }
 
+    siggen->set_enable(true, port);
+
     // Start streaming
     uhd::stream_cmd_t stream_cmd((total_num_samps == 0)
                                      ? uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS
@@ -512,7 +604,7 @@ siggen->set_enable(true, port);
     stream_cmd.num_samps  = size_t(total_num_samps);
     stream_cmd.stream_now = false;
     stream_cmd.time_spec =
-        graph->get_mb_controller(rx_mb_idx)->get_timekeeper(rx_mb_idx)->get_time_now()
+        graph->get_mb_controller(rx_mb_idx)->get_timekeeper(0)->get_time_now()
         + setup_time;
     std::cout << "Issuing start stream cmd..." << std::endl;
     rx_radio_ctrl->issue_stream_cmd(stream_cmd, rx_chan);
@@ -528,8 +620,8 @@ if (enable_gps) {
 
 struct MeasurementRecord
 {
-    int64_t timestamp_us;     // 8 bytes
-    char    gps_time[20];     // 20 bytes
+    int64_t timestamp_us;     // 8 bytes (UTC Unix microseconds if --gps, otherwise device time)
+    char    gps_time[32];     // 32 bytes (full GPS ISO-8601 UTC fix)
     double  latitude;         // 8 bytes
     double  longitude;        // 8 bytes
     double  altitude;         // 8 bytes
@@ -539,7 +631,7 @@ struct MeasurementRecord
 #pragma pack(pop)
 
 static_assert(
-    sizeof(MeasurementRecord) == 60,
+    sizeof(MeasurementRecord) == 72,
     "Unexpected MeasurementRecord size"
 );
 
@@ -583,17 +675,20 @@ if (save_data) {
 }
 
 uint16_t last_sequence = 0;
-uint64_t last_sample_index = 0;
+double last_pulse_time_seconds = 0.0;
 bool first_measurement = true;
 
 
-bool timestamp_reference_valid = false;
-uint64_t reference_sample_index = 0;
-int64_t reference_timestamp_us = 0;
-
-
-
-// -------------------------------------------------
+// Tick rate of the radio timekeeper, which may differ from RX sample rate.
+const double tick_rate = graph->get_mb_controller(rx_mb_idx)
+    ->get_timekeeper(0)->get_tick_rate();
+if (tick_rate <= 0.0) {
+    throw std::runtime_error("Invalid USRP timekeeper tick rate");
+}
+std::cout << "USRP tick rate: " << tick_rate << " Hz\n";
+std::cout << "Recorded timestamp_us is "
+          << (enable_gps ? "GPS-aligned Unix UTC" : "UNSYNCHRONIZED device time")
+          << " (microseconds).\n";
 
 try
 {
@@ -611,13 +706,15 @@ try
             continue;
         }
 
-        // -------------------------------------------------
-        // Pulse time
-        // -------------------------------------------------
-
+        // CHDR timestamp is in device ticks; sample_offset is in RX samples.
+        // Never treat the legacy sample_index as an absolute sample counter.
+        if (!pulse.has_time) {
+            std::cerr << "Skipping measurement without CHDR timestamp, seq="
+                      << pulse.sequence << std::endl;
+            continue;
+        }
         const double pulse_time_seconds =
-            static_cast<double>(
-                pulse.sample_index) / rate;
+            pulse.trigger_time_seconds(tick_rate, rate);
 
         // -------------------------------------------------
         // RX amplitude / dBFS
@@ -641,61 +738,27 @@ try
         // -------------------------------------------------
 
         uint16_t sequence_delta = 0;
-        uint64_t sample_delta   = 0;
-
-        if (!first_measurement)
-        {
-            sequence_delta =
-                static_cast<uint16_t>(
-                    pulse.sequence -
-                    last_sequence);
-
-            sample_delta =
-                pulse.sample_index -
-                last_sample_index;
+        double delta_seconds = 0.0;
+        if (!first_measurement) {
+            sequence_delta = static_cast<uint16_t>(pulse.sequence - last_sequence);
+            delta_seconds = pulse_time_seconds - last_pulse_time_seconds;
         }
 
-        // -------------------------------------------------
-        // Print every pulse
-        // -------------------------------------------------
+        std::cout << "SEQ=" << pulse.sequence
+                  << " PACKET_TICKS=" << pulse.packet_timestamp
+                  << " OFFSET=" << pulse.sample_offset
+                  << " DEVICE_TIME_S=" << std::fixed
+                  << std::setprecision(9) << pulse_time_seconds;
 
-        std::cout
-            << "SEQ="
-            << pulse.sequence
-            << " SAMPLE="
-            << pulse.sample_index
-            << " TIME_S="
-            << std::fixed
-            << std::setprecision(9)
-            << pulse_time_seconds;
-
-        if (!first_measurement)
-        {
-            const double delta_seconds =
-                static_cast<double>(
-                    sample_delta) / rate;
-
-            const double pri_seconds =
-                (sequence_delta > 0)
-                    ? delta_seconds /
-                      static_cast<double>(
-                          sequence_delta)
-                    : 0.0;
-
-            const uint16_t missed =
-                (sequence_delta > 0)
-                    ? sequence_delta - 1
-                    : 0;
-
-            std::cout
-                << " DELTA_S="
-                << delta_seconds
-                << " PRI_US="
-                << pri_seconds * 1e6
-                << " SEQ_DELTA="
-                << sequence_delta
-                << " MISSED="
-                << missed;
+        if (!first_measurement) {
+            const double pri_seconds = sequence_delta > 0
+                ? delta_seconds / sequence_delta : 0.0;
+            const uint16_t missed = sequence_delta > 0
+                ? sequence_delta - 1 : 0;
+            std::cout << " DELTA_S=" << delta_seconds
+                      << " PRI_US=" << pri_seconds * 1e6
+                      << " SEQ_DELTA=" << sequence_delta
+                      << " MISSED=" << missed;
         }
 
         std::cout
@@ -711,30 +774,10 @@ try
 
 if (save_data)
 {
-    // Establish the time reference using the first FPGA measurement
-    if (!timestamp_reference_valid)
-    {
-        reference_sample_index = pulse.sample_index;
-
-        reference_timestamp_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now()
-                    .time_since_epoch())
-                .count();
-
-        timestamp_reference_valid = true;
-    }
-
-    // Convert FPGA sample index to elapsed microseconds
-    const uint64_t sample_offset =
-        pulse.sample_index - reference_sample_index;
-
-    const int64_t timestamp_us =
-        reference_timestamp_us
-        + static_cast<int64_t>(
-            (static_cast<double>(sample_offset) / rate)
-            * 1e6);
-
+    // When --gps is enabled, GPS/PPS synchronization was verified before RX.
+    // Otherwise this remains unsynchronized USRP device time.
+    const int64_t timestamp_us = static_cast<int64_t>(
+        std::llround(pulse_time_seconds * 1e6));
 
     // -------------------------------------------------
     // GPS
@@ -800,6 +843,13 @@ if (save_data)
     record.amplitude_dbm = rx_dbfs;
 
 
+    // GPS fix is the latest recent TPV fix, NOT necessarily at pulse time.
+    // Print the GPS UTC fix separately from device pulse time.
+    std::cout << " GPS_FIX_UTC=" << gps_time_str
+              << " LAT=" << latitude
+              << " LON=" << longitude
+              << " ALT=" << altitude << std::endl;
+
     // -------------------------------------------------
     // Buffer measurement
     // -------------------------------------------------
@@ -835,8 +885,7 @@ if (save_data)
         last_sequence =
             pulse.sequence;
 
-        last_sample_index =
-            pulse.sample_index;
+        last_pulse_time_seconds = pulse_time_seconds;
 
         first_measurement = false;
     }

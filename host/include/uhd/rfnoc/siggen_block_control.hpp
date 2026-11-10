@@ -7,6 +7,7 @@
 #pragma once
 
 #include <uhd/config.hpp>
+#include <uhd/exception.hpp>
 #include <uhd/rfnoc/noc_block_base.hpp>
 #include <uhd/utils/math.hpp>
 #include <complex>
@@ -18,8 +19,26 @@ enum class siggen_waveform { CONSTANT, SINE_WAVE, NOISE };
 struct pulse_info
 {
     uint16_t sequence;
-    uint64_t sample_index;
-    uint32_t avg_power;
+    // Legacy 48-bit snapshot field; for FIFO records, contains the low
+    // 48 bits of packet_timestamp (NOT an absolute sample index).
+    uint64_t sample_index = 0;
+    uint32_t avg_power = 0;
+
+    // Complete CHDR metadata from the 160-bit measurement FIFO.
+    uint64_t packet_timestamp = 0; // Device ticks of first packet sample
+    uint32_t sample_offset = 0;    // Zero-based offset within CHDR packet
+    bool has_time = false;         // CHDR timestamp validity
+
+    // Convert to seconds using the actual radio tick and RX sample rates.
+    // Only meaningful when has_time is true.
+    double trigger_time_seconds(double tick_rate, double rx_sample_rate) const
+    {
+        if (!has_time || tick_rate <= 0.0 || rx_sample_rate <= 0.0) {
+            throw uhd::value_error("Valid timestamp and positive rates required");
+        }
+        return double(packet_timestamp) / tick_rate
+            + double(sample_offset) / rx_sample_rate;
+    }
 };
 
 /*! Siggen Control Class
@@ -63,6 +82,9 @@ static const uint32_t REG_MEAS_FIFO_OVERFLOW_OFFSET;
 static const uint32_t REG_MEAS_FIFO_AVG_POWER_OFFSET;
 static const uint32_t REG_MEAS_FIFO_VALID_OFFSET;
 static const uint32_t REG_MEAS_FIFO_POP_OFFSET;
+static const uint32_t REG_MEAS_FIFO_TIME_HI_OFFSET; // 0x60
+static const uint32_t REG_MEAS_FIFO_OFFSET_OFFSET;  // 0x64
+static const uint32_t REG_MEAS_FIFO_STATUS_OFFSET;  // 0x68
 
 virtual uint32_t get_measurement_fifo_count(
     const size_t port = 0) = 0;

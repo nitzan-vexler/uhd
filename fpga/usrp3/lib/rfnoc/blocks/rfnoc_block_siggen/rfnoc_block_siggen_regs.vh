@@ -201,3 +201,29 @@ localparam [19:0] REG_MEAS_FIFO_VALID     = 20'h00054;
 // 0x58:
 // Write 1 to bit 0 to remove the current measurement
 localparam [19:0] REG_MEAS_FIFO_POP       = 20'h00058;
+
+// 0x60:
+// Upper 16 bits of the 64-bit CHDR packet timestamp
+//
+// [31:16] Reserved
+// [15:0]  CHDR packet timestamp [63:48]
+//
+localparam [19:0] REG_MEAS_FIFO_TIME_HI = 20'h00060;
+
+
+// 0x64:
+// Zero-based sample offset of the trigger within its RX packet
+//
+// [31:0] Trigger sample offset
+//
+localparam [19:0] REG_MEAS_FIFO_OFFSET = 20'h00064;
+
+
+// 0x68:
+// Measurement timestamp status
+//
+// [31:1] Reserved
+// [0]    1 = CHDR packet timestamp is valid
+//        0 = RX packet did not contain a valid timestamp
+//
+localparam [19:0] REG_MEAS_FIFO_STATUS = 20'h00068;

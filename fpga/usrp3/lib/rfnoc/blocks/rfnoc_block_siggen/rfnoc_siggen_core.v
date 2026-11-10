@@ -12,35 +12,40 @@
 //
 
 
+
 module rfnoc_siggen_core #(
-  parameter integer PIPE_LATENCY = 16 // Measured pipeline latency in CE_CLK cycles
+    parameter integer PIPE_LATENCY = 16
 )(
+    input wire clk,
+    input wire rst,
 
-  input wire clk,
-  input wire rst,
+    // CtrlPort Slave
+    input  wire        s_ctrlport_req_wr,
+    input  wire        s_ctrlport_req_rd,
+    input  wire [19:0] s_ctrlport_req_addr,
+    input  wire [31:0] s_ctrlport_req_data,
+    output reg         s_ctrlport_resp_ack,
+    output reg  [31:0] s_ctrlport_resp_data,
 
-  // CtrlPort Slave
-  input  wire        s_ctrlport_req_wr,
-  input  wire        s_ctrlport_req_rd,
-  input  wire [19:0] s_ctrlport_req_addr,
-  input  wire [31:0] s_ctrlport_req_data,
-  output reg         s_ctrlport_resp_ack,
-  output reg  [31:0] s_ctrlport_resp_data,
-  
-  // input data stream
-  input  wire [31:0] s_tdata,
-  input  wire        s_tvalid,
-  input  wire        s_tlast,
-  output wire        s_tready,
-  input  wire [15:0] s_tlength,
+    // Input data stream
+    input  wire [31:0] s_tdata,
+    input  wire        s_tvalid,
+    input  wire        s_tlast,
+    output wire        s_tready,
+    input  wire [15:0] s_tlength,
 
-  // Output data stream
-  output wire [31:0] m_tdata,
-  output wire        m_tlast,
-  output wire        m_tvalid,
-  input  wire        m_tready,
-  output wire [15:0] m_tlength
+    // Input timestamp
+    input  wire [63:0] s_ttimestamp,
+    input  wire        s_thas_time,
+
+    // Output data stream
+    output wire [31:0] m_tdata,
+    output wire        m_tlast,
+    output wire        m_tvalid,
+    input  wire        m_tready,
+    output wire [15:0] m_tlength
 );
+
 
   `include "rfnoc_block_siggen_regs.vh"
 
@@ -225,6 +230,23 @@ REG_MEAS_FIFO_VALID: begin
     };
 
 end
+REG_MEAS_FIFO_TIME_HI: begin
+    s_ctrlport_resp_data <= meas_read_valid
+        ? {16'd0, meas_read_timestamp[63:48]}
+        : 32'd0;
+end
+
+REG_MEAS_FIFO_OFFSET: begin
+    s_ctrlport_resp_data <= meas_read_valid
+        ? meas_read_offset
+        : 32'd0;
+end
+
+REG_MEAS_FIFO_STATUS: begin
+    s_ctrlport_resp_data <= meas_read_valid
+        ? {16'd0, meas_read_status}
+        : 32'd0;
+end
 
         endcase
       end
@@ -265,7 +287,7 @@ always @(posedge clk) begin
   if (rst)
     over_thr_d <= 1'b0;
   else
-    over_thr_d <= s_tvalid && (mag_sq >= {1'b0,thr_sq});
+    over_thr_d <= rx_sample_fire && (mag_sq >= {1'b0,thr_sq});
 end
 
 // Edge detector
@@ -279,56 +301,86 @@ end
 
 wire trig_pulse = over_thr_d & ~over_thr_q;
 
-// Count every accepted RX sample.
-//
-// s_tready is permanently asserted in this design, but use the
-// complete AXI handshake expression for correctness.
+
+
+// ------------------------------------------------------------
+// CHDR packet timestamp + trigger sample offset
+// ------------------------------------------------------------
+
 wire rx_sample_fire = s_tvalid && s_tready;
 
-reg [63:0] rx_sample_counter;
+// Zero-based sample index within each RX packet
+reg [31:0] packet_sample_offset;
 
-// Timestamp captured at the threshold crossing.
-reg [63:0] trigger_sample_timestamp;
+// Metadata aligned with the registered threshold comparator
+reg [63:0] compared_packet_timestamp;
+reg [31:0] compared_sample_offset;
+reg        compared_has_time;
 
-// Published measurement timestamp and sequence.
+// Metadata captured when a rising-edge trigger is detected
+reg [63:0] trigger_packet_timestamp;
+reg [31:0] trigger_sample_offset;
+reg        trigger_timestamp_valid;
+
+// Existing debug readback registers
 reg [47:0] dbg_pulse_sample_index;
 reg [15:0] dbg_pulse_sequence;
 
-// ------------------------------------------------------------------
-// Measurement FIFO
+
+// ------------------------------------------------------------
+// Measurement FIFO: 160 bits per measurement
 //
-// One entry =
-//   [95:64] average RX power
-//   [63:48] sequence
-//   [47:0]  sample index
-//
-// 96 bits per pulse.
-// ------------------------------------------------------------------
-// Xilinx FIFO Generator v13.2: common-clock, 96-bit, 1024-deep, FWFT.
-// In FWFT mode, dout is the oldest entry whenever empty == 0.
-wire [95:0] meas_fifo_dout;
-wire        meas_fifo_full;
-wire        meas_fifo_empty;
-wire [10:0] meas_fifo_count;
-reg         meas_fifo_overflow;
+// [159:128] Average RX power
+// [127:112] Sequence number
+// [111:48]  CHDR packet timestamp
+// [47:16]   Trigger sample offset
+// [15:0]    Status (bit 0 = valid timestamp)
+// ------------------------------------------------------------
+
+wire [159:0] meas_fifo_dout;
+wire         meas_fifo_full;
+wire         meas_fifo_empty;
+wire [10:0]  meas_fifo_count;
+
+reg meas_fifo_overflow;
 
 wire meas_read_valid = !meas_fifo_empty;
-wire [31:0] meas_read_avg_power = meas_fifo_dout[95:64];
-wire [15:0] meas_read_sequence = meas_fifo_dout[63:48];
-wire [47:0] meas_read_timestamp = meas_fifo_dout[47:0];
 
-// pop_req is registered by CtrlPort. It is consumed at the next clock.
-wire meas_fifo_rd_en = meas_fifo_pop_req && !meas_fifo_empty;
-// Only accepted writes reach the FIFO; preserve a sticky overflow flag.
-wire meas_fifo_wr_en = meas_fifo_push_req && !meas_fifo_full && !rst;
+wire [31:0] meas_read_avg_power =
+    meas_fifo_dout[159:128];
 
-wire [95:0] meas_fifo_push_data;
+wire [15:0] meas_read_sequence =
+    meas_fifo_dout[127:112];
+
+wire [63:0] meas_read_timestamp =
+    meas_fifo_dout[111:48];
+
+wire [31:0] meas_read_offset =
+    meas_fifo_dout[47:16];
+
+wire [15:0] meas_read_status =
+    meas_fifo_dout[15:0];
+
+wire meas_fifo_rd_en =
+    meas_fifo_pop_req && !meas_fifo_empty;
+
+wire meas_fifo_wr_en =
+    meas_fifo_push_req && !meas_fifo_full && !rst;
+
+wire [159:0] meas_fifo_push_data;
 
 assign meas_fifo_push_data = {
     avg_power_128[31:0],
     dbg_pulse_sequence + 16'd1,
-    trigger_sample_timestamp[47:0]
+    trigger_packet_timestamp,
+    trigger_sample_offset,
+    {15'd0, trigger_timestamp_valid}
 };
+
+
+// IMPORTANT:
+// Configure fifo_generator_0 for 160-bit input/output data.
+// Preserve common clock, FWFT and 1024-entry depth.
 
 fifo_generator_0 meas_fifo_i (
     .clk        (clk),
@@ -342,6 +394,8 @@ fifo_generator_0 meas_fifo_i (
     .data_count (meas_fifo_count)
 );
 
+
+// Sticky FIFO overflow flag
 always @(posedge clk) begin
     if (rst)
         meas_fifo_overflow <= 1'b0;
@@ -349,23 +403,53 @@ always @(posedge clk) begin
         meas_fifo_overflow <= 1'b1;
 end
 
-always @(posedge clk) begin
-  if (rst) begin
-    rx_sample_counter        <= 64'd0;
-    trigger_sample_timestamp <= 64'd0;
-  end else begin
-    if (rx_sample_fire)
-      rx_sample_counter <= rx_sample_counter + 64'd1;
 
-    /*
-     * trig_pulse is generated from a registered threshold comparison.
-     * At this point the counter has already advanced past the triggering
-     * sample, so subtract one.
-     */
-    if (trig_pulse)
-      trigger_sample_timestamp <= rx_sample_counter - 64'd1;
-  end
+// ------------------------------------------------------------
+// Timestamp capture
+//
+// The threshold comparator over_thr_d is registered.
+// compared_* is registered on the same clock edge.
+//
+// On the following clock, trig_pulse captures the metadata
+// belonging to the threshold-crossing sample.
+// ------------------------------------------------------------
+
+always @(posedge clk) begin
+    if (rst) begin
+        packet_sample_offset      <= 32'd0;
+
+        compared_packet_timestamp <= 64'd0;
+        compared_sample_offset    <= 32'd0;
+        compared_has_time         <= 1'b0;
+
+        trigger_packet_timestamp  <= 64'd0;
+        trigger_sample_offset     <= 32'd0;
+        trigger_timestamp_valid   <= 1'b0;
+    end else begin
+
+        if (rx_sample_fire) begin
+
+            compared_packet_timestamp <= s_ttimestamp;
+            compared_sample_offset    <= packet_sample_offset;
+            compared_has_time         <= s_thas_time;
+
+            // Reset offset at the end of every packet
+            if (s_tlast)
+                packet_sample_offset <= 32'd0;
+            else
+                packet_sample_offset <= packet_sample_offset + 32'd1;
+
+        end
+
+        if (trig_pulse) begin
+            trigger_packet_timestamp <= compared_packet_timestamp;
+            trigger_sample_offset    <= compared_sample_offset;
+            trigger_timestamp_valid  <= compared_has_time;
+        end
+
+    end
 end
+
 
 localparam [3:0]
     ST_IDLE          = 4'd0,
@@ -548,7 +632,7 @@ ST_PEAK: begin
             sqrt_in_valid <= 1'b1;
 
             // Publish measurement information
-            dbg_pulse_sample_index <= trigger_sample_timestamp[47:0];
+            dbg_pulse_sample_index <= trigger_packet_timestamp[47:0];
             dbg_pulse_sequence     <= dbg_pulse_sequence + 16'd1;
 
             // Now wait for sqrt result
