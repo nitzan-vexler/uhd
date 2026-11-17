@@ -18,11 +18,11 @@ from combined_parser import convert
 
 WORKDIR = os.path.expanduser('~/workarea/uhd/work/build')
 HOST_APP = './rfnoc_radio_loopback'
-REMOTE_DIR = '/home/work/fixed_power'
-REMOTE_APP = './rfnoc_radio_loopback'
-REMOTE_LIB = '/home/root/app/uhd_lib'
-REMOTE_PID = '/tmp/rfnoc_gui_pulse.pid'
-REMOTE_FILE = REMOTE_DIR + '/measurements.dat'
+REMOTE_DIR = '/data/siggen'
+REMOTE_APP = './siggen_e310_recorder'
+REMOTE_LIB = '/data/siggen/lib'
+REMOTE_PID = '/data/siggen/recorder.pid'
+REMOTE_FILE = '/data/siggen/measurements.dat'
 
 class CombinedGUI:
     def __init__(self, root):
@@ -135,7 +135,7 @@ class CombinedGUI:
         ttk.Combobox(f,textvariable=self.target,values=['Host PC','USRP E312'],state='readonly').grid(row=0,column=1,sticky='ew')
         self.target.trace_add('write',lambda *_: self.toggle_remote())
         f=group('RX Parameters')
-        fields(f,[('RX frequency [MHz]','rx_freq','200'),('RX gain [dB]','rx_gain','10'),('RX BW [MHz]','rx_bw','1'),('Threshold [dBFS]','threshold','-30')])
+        fields(f,[('RX frequency [MHz]','rx_freq','200'),('RX gain [dB]','rx_gain','10'),('RX BW [MHz]','rx_bw','1'),('Threshold [dBFS]','threshold','-30'),('dBm calibration offset [dB]','dbm_offset','0')])
         f=group('TX Parameters')
         fields(f,[('TX frequency [MHz]','tx_freq','200'),('TX gain [dB]','tx_gain','70'),('TX BW [MHz]','tx_bw','1')])
         f=group('Sampling')
@@ -168,7 +168,7 @@ class CombinedGUI:
         for i,(key,title,initial) in enumerate([
             ('state','ACQUISITION','IDLE'),
             ('freq','RX FREQUENCY','200 MHz'),
-            ('power','RX POWER','— dBFS'),
+            ('power','RX POWER','— dBm'),
             ('pri','PULSE PRI','— µs'),
             ('count','PULSES','0'),
             ('gps','GPS FIX','WAITING'),
@@ -260,7 +260,7 @@ class CombinedGUI:
         self.fig.patch.set_facecolor(self.surface)
         self.ax.set_facecolor(self.surface)
         self.ax.set_xlabel('Pulse number', color=self.muted)
-        self.ax.set_ylabel('RX dBFS', color=self.muted)
+        self.ax.set_ylabel('RX dBm', color=self.muted)
         self.ax.tick_params(colors=self.muted)
         for spine in self.ax.spines.values(): spine.set_color('#3b526c')
         self.ax.grid(True, color='#344962', alpha=0.55)
@@ -276,6 +276,8 @@ class CombinedGUI:
         log_scroll.grid(row=0,column=1,sticky='ns');self.log.configure(yscrollcommand=log_scroll.set)
         self.make_parser(parser)
         self.toggle_remote()
+        self._plot_dirty = False
+        root.after(200, self.periodic_plot_refresh)
         root.after(80,self.drain_messages)
         root.after(200,self.auto_check_usrp_connection)
         root.after(400,self.auto_check_gps_antenna)
@@ -470,15 +472,19 @@ class CombinedGUI:
     def emit(self,s):self.messages.put(('log',s))
     def drain_messages(self):
         try:
-            while True:
+            # Bound work per Tk callback so continuous UHD output cannot freeze UI.
+            for _ in range(120):
                 kind,payload=self.messages.get_nowait()
                 if kind=='log':
                     self.log.insert('end',payload);self.log.see('end')
+                    if int(float(self.log.index('end-1c').split('.')[0])) > 2500:
+                        self.log.delete('1.0', '500.0')
                     self.update_instrument_metrics(payload)
-                    match=re.search(r'RX_dBFS\s*=\s*(-?\d+(?:\.\d+)?)',payload)
+                    match=re.search(r'RX_dBm\s*=\s*(-?\d+(?:\.\d+)?)',payload)
                     if match:
                         self.x.append(self.pulse_count);self.y.append(float(match.group(1)))
-                        if self.pulse_count%5==0:self.refresh_plot()
+                        # Refresh plot at a fixed low rate, not for every few pulses.
+                        self._plot_dirty = True
                 elif kind=='usrp_connection':
                     generation, connected, label = payload
                     if generation == self._usrp_check_generation:
@@ -501,13 +507,23 @@ class CombinedGUI:
                 elif kind=='parse':self.parse_status.set(payload)
         except queue.Empty:pass
         self.root.after(80,self.drain_messages)
+    def periodic_plot_refresh(self):
+        if self._plot_dirty:
+            self._plot_dirty = False
+            self.refresh_plot()
+        self.root.after(200, self.periodic_plot_refresh)
+
     def update_instrument_metrics(self, line):
         # The physical SYNC connector is unused. GPS/PPS software sync
         # must not light its LED; UTC status is shown in GPS metrics.
         # Values come from the running C++ process; no fabricated telemetry.
-        m=re.search(r'RX_dBFS\s*=\s*(-?\d+(?:\.\d+)?)',line)
-        if m:self.metric_vars['power'].set(f'{float(m.group(1)):.2f} dBFS')
-        m=re.search(r'\bSEQ=(\d+)',line)
+        m=re.search(r'RX_dBm\s*=\s*(-?\d+(?:\.\d+)?)',line)
+        if m:self.metric_vars['power'].set(f'{float(m.group(1)):.2f} dBm')
+        m=re.search(r'\bCOUNT=(\d+)',line)
+        if m:
+            self.pulse_count = int(m.group(1))
+            self.metric_vars['count'].set(f'{self.pulse_count:,}')
+        m=re.search(r'\bSEQ=(\d+)',line) if not m else None
         if m:
             seq=int(m.group(1))
             if self.last_seq is None:
@@ -544,9 +560,9 @@ class CombinedGUI:
     def refresh_plot(self):
         self.ax.clear()
         self.ax.set_facecolor(self.surface)
-        self.ax.plot(list(self.x),list(self.y),color=self.accent,linewidth=1.8,label='RX dBFS')
+        self.ax.plot(list(self.x),list(self.y),color=self.accent,linewidth=1.8,label='RX dBm')
         self.ax.set_xlabel('Pulse number',color=self.muted)
-        self.ax.set_ylabel('RX dBFS',color=self.muted)
+        self.ax.set_ylabel('RX dBm',color=self.muted)
         self.ax.tick_params(colors=self.muted)
         for spine in self.ax.spines.values(): spine.set_color('#3b526c')
         self.ax.grid(True,color='#344962',alpha=0.55)
@@ -584,7 +600,7 @@ class CombinedGUI:
               '--rx-gain',v('rx_gain'),'--tx-gain',v('tx_gain'),'--rx-ant',rxant,'--tx-ant',txant,
               '--rx-chan',rxchan,'--tx-chan',txchan,'--threshold',str(thr),'--avg-delay',v('avg_delay'),
               '--delay',str(delay_counts),'--pw',str(pw_counts),'--pulse-gap',str(gap_counts),
-              '--spp',v('spp'),'--rate',str(rate*1e6)]
+              '--spp',v('spp'),'--rate',str(rate*1e6),'--dbm-offset',v('dbm_offset')]
         for key,option in [('rx_bw','--rx-bw'),('tx_bw','--tx-bw')]:
             if v(key):args.extend([option,str(float(v(key))*1e6)])
         if self.gps.get():args.extend(['--gps', '--pps', 'gpsdo', '--ref', 'internal'])
@@ -596,7 +612,7 @@ class CombinedGUI:
         self.x.clear();self.y.clear();self.pulse_count=0;self.refresh_plot()
         self.last_seq=None
         self.metric_vars['count'].set('0')
-        self.metric_vars['power'].set('— dBFS')
+        self.metric_vars['power'].set('— dBm')
         self.metric_vars['pri'].set('— µs')
         self.metric_vars['gps'].set('WAITING')
         self.sync_test_state = 'Disconnected'
@@ -610,7 +626,7 @@ class CombinedGUI:
             command=(f'export LD_LIBRARY_PATH={shlex.quote(REMOTE_LIB)}:$LD_LIBRARY_PATH && '
                      f'cd {shlex.quote(REMOTE_DIR)} && echo $$ > {shlex.quote(REMOTE_PID)} && '
                      f'exec {REMOTE_APP} '+' '.join(shlex.quote(x) for x in args))
-            self.run_command(['ssh','-o','ConnectTimeout=5',f'{user}@{ip}',command])
+            self.run_command(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=5',f'{user}@{ip}',command])
     def stop(self):
         process=self.proc
         if process is None or process.poll() is not None:return
@@ -624,9 +640,28 @@ class CombinedGUI:
         else:
             try:os.killpg(os.getpgid(process.pid),signal.SIGINT)
             except ProcessLookupError:pass
+            # Graceful shutdown first; escalate only if still alive.
+            threading.Thread(target=self._ensure_stopped, args=(process,), daemon=True).start()
+
+    def _ensure_stopped(self, process):
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def remote_stop(self,user,ip,command):
         try:
-            r=subprocess.run(['ssh','-o','ConnectTimeout=5',f'{user}@{ip}',command],capture_output=True,text=True,timeout=10)
+            r=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=5',f'{user}@{ip}',command],capture_output=True,text=True,timeout=10)
             self.emit(r.stdout+r.stderr)
         except Exception as e:self.emit(f'Remote stop failed: {e}\n')
     def set_usrp_connection(self, connected, label):
@@ -725,10 +760,16 @@ class CombinedGUI:
         src=self.parser_in.get().strip();dest=self.parser_out.get().strip()
         if not src or not dest:messagebox.showerror('Parser','Select input and output files');return
         if os.path.abspath(src)==os.path.abspath(dest):messagebox.showerror('Parser','Input and output must differ');return
-        self.parse_status.set('Converting...')
+        try:
+            offset = float(self.v['dbm_offset'].get().strip())
+            if not __import__('math').isfinite(offset):
+                raise ValueError('Offset must be finite')
+        except ValueError:
+            messagebox.showerror('Calibration', 'Enter a valid dBm calibration offset in Combined Mode.');return
+        self.parse_status.set(f'Converting with offset {offset:+.2f} dB...')
         def work():
             try:
-                n=convert(src,dest)
+                n=convert(src,dest,calibration_offset_db=offset)
                 self.messages.put(('parse',f'Success: {n} pulse records written to {dest}'))
             except Exception as e:self.messages.put(('parse',f'Error: {e}'))
         threading.Thread(target=work,daemon=True).start()

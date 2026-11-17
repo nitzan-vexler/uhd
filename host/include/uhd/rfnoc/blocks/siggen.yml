@@ -7,7 +7,7 @@ noc_id: 0x51663110
 makefile_srcs: "${fpga_lib_dir}/blocks/rfnoc_block_siggen/Makefile.srcs"
 
 parameters:
-  NUM_PORTS: 1
+  NUM_PORTS: 2
 
 clocks:
   - name: rfnoc_chdr

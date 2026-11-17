@@ -21,4 +21,10 @@ noc_shell_siggen.v \
 rfnoc_siggen_core.v \
 rfnoc_block_siggen_regs.vh \
 rfnoc_block_siggen.v \
+../../../ip/fifo_generator_0/fifo_generator_0.xci \
+../../../ip/fifo_generator_0/fifo_generator_0_stub.v \
+../../../ip/fifo_generator_0/fifo_generator_0.xci \
+../../../ip/fifo_generator_0/fifo_generator_0_stub.v \
+../../../ip/cordic_0/cordic_0.xci \
+../../../ip/cordic_0/cordic_0_stub.v \
 )

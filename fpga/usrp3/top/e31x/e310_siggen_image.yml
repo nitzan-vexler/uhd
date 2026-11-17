@@ -16,15 +16,22 @@ image_core_name: 'usrp_e310_sg3_fpga'   # Name to use for the generated output f
 # A list of all stream endpoints in design
 # ----------------------------------------
 stream_endpoints:
-  ep0:                                  # Stream endpoint name
-    ctrl: True                          # Endpoint passes control traffic
-    data: True                          # Endpoint passes data traffic
-    buff_size: 8192                    # Ingress buffer size for data
+  ep0:
+    ctrl: True
+    data: True
+    buff_size: 8192
+
   ep1:
     ctrl: False
     data: True
     buff_size: 8192
+
   ep2:
+    ctrl: False
+    data: True
+    buff_size: 8192
+
+  ep3:
     ctrl: False
     data: True
     buff_size: 8192
@@ -38,7 +45,7 @@ noc_blocks:
   siggen0:                               # NoC block name
     block_desc: 'siggen.yml'             # Block device descriptor
     parameters:
-      NUM_PORTS: 1
+      NUM_PORTS: 2
 # A list of all static connections in design
 # ------------------------------------------
 # Format: A list of connection maps (list of key-value pairs) with the following keys
@@ -47,23 +54,27 @@ noc_blocks:
 #   - dstblk  = Destination block to connect
 #   - dstport = Port on the destination block to connect
 connections:
-  # TX A
+  # Radio channel 0
   - { srcblk: ep0,    srcport: out0,  dstblk: radio0, dstport: in_0 }
-  # RX A
   - { srcblk: radio0, srcport: out_0, dstblk: ep0,    dstport: in0  }
-  # TX B
+
+  # Radio channel 1
   - { srcblk: ep1,    srcport: out0,  dstblk: radio0, dstport: in_1 }
-  # RX B
   - { srcblk: radio0, srcport: out_1, dstblk: ep1,    dstport: in0  }
-  
+
+  # SigGen trigger input
   - { srcblk: ep2,    srcport: out0,  dstblk: siggen0, dstport: unused }
-  - { srcblk: siggen0, srcport: out_0, dstblk: ep2,    dstport: in0  }
-  #
-  # BSP Connections
+
+  # SigGen waveform output
+  - { srcblk: siggen0, srcport: out_0, dstblk: ep2, dstport: in0 }
+
+  # SigGen measurement output
+  - { srcblk: siggen0, srcport: out_1, dstblk: ep3, dstport: in0 }
+
+  # BSP connections
   - { srcblk: radio0,   srcport: ctrlport, dstblk: _device_, dstport: ctrlport }
   - { srcblk: _device_, srcport: radio,    dstblk: radio0,   dstport: radio    }
   - { srcblk: _device_, srcport: time,     dstblk: radio0,   dstport: time     }
-
 # A list of all clock domain connections in design
 # ------------------------------------------------
 # Format: A list of connection maps (list of key-value pairs) with the following keys

@@ -43,8 +43,16 @@ module rfnoc_siggen_core #(
     output wire        m_tlast,
     output wire        m_tvalid,
     input  wire        m_tready,
-    output wire [15:0] m_tlength
-);
+    output wire [15:0] m_tlength,
+
+    // Measurement AXI-Stream output
+    output wire [31:0] meas_tdata,
+    output wire        meas_tvalid,
+    input  wire        meas_tready,
+    output wire        meas_tlast,
+    output wire [15:0] meas_tlength
+    
+    );
 
 
   `include "rfnoc_block_siggen_regs.vh"
@@ -362,7 +370,9 @@ wire [15:0] meas_read_status =
     meas_fifo_dout[15:0];
 
 wire meas_fifo_rd_en =
-    meas_fifo_pop_req && !meas_fifo_empty;
+    !meas_fifo_empty &&
+    meas_stream_fire &&
+    (meas_word_idx == 3'd4);
 
 wire meas_fifo_wr_en =
     meas_fifo_push_req && !meas_fifo_full && !rst;
@@ -393,6 +403,33 @@ fifo_generator_0 meas_fifo_i (
     .empty      (meas_fifo_empty),
     .data_count (meas_fifo_count)
 );
+
+// Measurement streaming serializer
+reg [2:0] meas_word_idx;
+
+wire meas_stream_fire = meas_tvalid && meas_tready;
+
+assign meas_tvalid = !meas_fifo_empty;
+assign meas_tlast  = (meas_word_idx == 3'd4);
+assign meas_tlength = 16'd20;
+
+assign meas_tdata =
+    (meas_word_idx == 3'd0) ? meas_fifo_dout[159:128] :
+    (meas_word_idx == 3'd1) ? meas_fifo_dout[127:96]  :
+    (meas_word_idx == 3'd2) ? meas_fifo_dout[95:64]   :
+    (meas_word_idx == 3'd3) ? meas_fifo_dout[63:32]   :
+                             meas_fifo_dout[31:0];
+
+always @(posedge clk) begin
+    if (rst) begin
+        meas_word_idx <= 3'd0;
+    end else if (meas_stream_fire) begin
+        if (meas_word_idx == 3'd4)
+            meas_word_idx <= 3'd0;
+        else
+            meas_word_idx <= meas_word_idx + 1'b1;
+    end
+end
 
 
 // Sticky FIFO overflow flag
@@ -963,7 +1000,25 @@ axis_packetize #(
   .o_tuser  (m_tlength_samples)
 );
 
+// synthesis translate_off
+reg [3:0] dbg_prev_state;
 
+always @(posedge clk) begin
+    if (rst) begin
+        dbg_prev_state <= 4'hF;
+    end else begin
+        if (state != dbg_prev_state) begin
+            $display(
+                "%0t SIGGEN FSM: %0d -> %0d, seq=%0d, peak_cnt=%0d",
+                $time, dbg_prev_state, state,
+                dbg_pulse_sequence, peak_cnt
+            );
+        end
+
+        dbg_prev_state <= state;
+    end
+end
+// synthesis translate_on
 
 
 endmodule

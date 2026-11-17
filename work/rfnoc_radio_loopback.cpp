@@ -34,10 +34,67 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <deque>
+#include <condition_variable>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 #include <uhd/types/time_spec.hpp>
+#include <uhd/stream.hpp>
+#include <complex>
+#include <array>
+
+// Measurement protocol: five 32-bit payload words per record.
+// IMPORTANT: Confirm word ordering and status bit definitions against the
+// FPGA measurement serializer before relying on decoded timestamps.
+// Expected layout here:
+//   word 0: avg_power[31:0]
+//   word 1: sequence[31:16], status[15:0]
+//   word 2: packet_timestamp[63:32]
+//   word 3: packet_timestamp[31:0]
+//   word 4: sample_offset[31:0]
+
+static uhd::rfnoc::pulse_info decode_measurement(
+    const std::array<uint32_t, 5>& words)
+{
+    uhd::rfnoc::pulse_info pulse{};
+
+    // FPGA: [159:128]
+    pulse.avg_power = words[0];
+
+    // FPGA: [127:112]
+    pulse.sequence =
+        static_cast<uint16_t>(words[1] >> 16);
+
+    // FPGA: [111:48] - 64-bit packet timestamp
+    pulse.packet_timestamp =
+        (uint64_t(words[1] & 0xFFFFu) << 48) |
+        (uint64_t(words[2]) << 16) |
+        (uint64_t(words[3]) >> 16);
+
+    // FPGA: [47:16] - 32-bit sample offset
+    pulse.sample_offset =
+        ((words[3] & 0xFFFFu) << 16) |
+        (words[4] >> 16);
+
+    // FPGA: [15:0] - status
+    const uint16_t status =
+        static_cast<uint16_t>(words[4] & 0xFFFFu);
+
+    pulse.has_time = (status & 0x1u) != 0;
+    pulse.sample_index = 0;
+
+    return pulse;
+}
+
+
+// Treat SC16 as an opaque 32-bit transport word. Verify I/Q halfword
+// order using a known FPGA test pattern before trusting measurements.
+static uint32_t unpack_measurement_word(const std::complex<int16_t>& s)
+{
+    return (uint32_t(uint16_t(s.real())) << 16) | uint16_t(s.imag());
+}
 
 namespace po = boost::program_options;
 using uhd::rfnoc::radio_control;
@@ -113,20 +170,22 @@ void gps_stream_thread()
 {
     std::cout << "[GPS] Starting gpspipe..." << std::endl;
 
-    // GPSD must be running locally; gpspipe is its JSON client.
-    FILE* pipe = popen("gpspipe -w", "r");
-
-    if (pipe == nullptr) {
-        std::cerr << "[GPS] Failed to start gpspipe" << std::endl;
-        return;
-    }
-
-    char buffer[2048];
-
-    while (
-        keep_gps_running.load()
-        && fgets(buffer, sizeof(buffer), pipe) != nullptr
-    ) {
+    // GPSD runs on the E310. Connect over SSH, as the GUI does.
+    // GNU timeout bounds the subprocess so the thread can exit on Stop.
+    // Change this address if your USRP address changes.
+    const char* gps_command =
+        "timeout 12s ssh -o BatchMode=yes -o ConnectTimeout=5 "
+        "-o ServerAliveInterval=3 -o ServerAliveCountMax=2 "
+        "root@192.168.0.100 'timeout 10s gpspipe -w'";
+    char buffer[4096];
+    while (keep_gps_running.load()) {
+        FILE* pipe = popen(gps_command, "r");
+        if (pipe == nullptr) {
+            std::cerr << "[GPS] Failed to start remote gpspipe" << std::endl;
+            break;
+        }
+        while (keep_gps_running.load() &&
+               fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         const std::string message(buffer);
 
         if (message.find("\"class\":\"TPV\"") == std::string::npos) {
@@ -142,7 +201,11 @@ void gps_stream_thread()
         }
     }
 
-    pclose(pipe);
+        pclose(pipe);
+        if (keep_gps_running.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    }
 
     std::cout << "[GPS] GPS thread stopped" << std::endl;
 }
@@ -244,7 +307,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // variables to be set by po
     std::string args, rx_ant, tx_ant, rx_blockid, tx_blockid, ref, pps, output_file;
     size_t total_num_samps, spp, rx_chan, tx_chan, threshold, pulsewidth, delay, avg_delay, pulse_gap;
-    double rate, rx_freq, tx_freq, rx_gain, tx_gain, rx_bw, tx_bw, total_time, setup_time;
+    double rate, rx_freq, tx_freq, rx_gain, tx_gain, rx_bw, tx_bw, total_time, setup_time, dbm_offset;
     bool rx_timestamps, save_data, enable_gps ;
 
     // setup the program options
@@ -265,6 +328,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
  po::value<std::string>(&output_file)
      ->default_value("combined_measurements.dat"),
  "Binary FPGA measurement output file")
+        ("dbm-offset", po::value<double>(&dbm_offset)->default_value(0.0), "Calibrated offset: dBm = dBFS + offset (dB)")
         ("gps", po::bool_switch(&enable_gps)->default_value(false), "Enable GPS data collection")
         ("avg-delay",po::value<size_t>(&avg_delay)->default_value(32),"Samples to wait after trigger before averaging")
         ("rx-freq", po::value<double>(&rx_freq)->default_value(200000000.0), "Rx RF center frequency in Hz")
@@ -329,36 +393,34 @@ using uhd::rfnoc::siggen_block_control;
 // Get the block
 uhd::rfnoc::block_id_t siggen_id("0/SigGen#0");   // adjust if different
 auto siggen = graph->get_block<siggen_block_control>(siggen_id);
+std::cout << "\n=== SigGen ports ===\n";
+std::cout << "Input ports: "
+          << siggen->get_num_input_ports() << "\n";
+std::cout << "Output ports: "
+          << siggen->get_num_output_ports() << "\n";
+
+std::cout << "\n=== Static FPGA connections ===\n";
+
+for (const auto& edge : graph->enumerate_static_connections()) {
+    std::cout << edge.to_string() << std::endl;
+}
+
 
 // Wire the graph: RX -> SigGen -> TX
 uhd::rfnoc::connect_through_blocks(graph, rx_radio_ctrl_id, rx_chan, siggen_id, 0, /*skip_pp=*/false);
 uhd::rfnoc::connect_through_blocks(graph, siggen_id, 0, tx_radio_ctrl_id, tx_chan, /*skip_pp=*/true);
+// SigGen output 1 carries opaque 32-bit measurement words.
+// SC16 is used solely as a 4-byte transport format.
+if (siggen->get_num_output_ports() < 2) {
+    throw std::runtime_error("SigGen output port 1 is not available");
+}
+uhd::stream_args_t meas_args("sc16", "sc16");
+auto meas_streamer = graph->create_rx_streamer(1, meas_args);
+graph->connect(siggen_id, 1, meas_streamer, 0);
 graph->commit();
-
-// -------------------------------------------------
-// Clear old FIFO measurements before starting
-// -------------------------------------------------
+std::cout << "[MEAS] SigGen output 1 connected to host RX streamer" << std::endl;
 
 const size_t port = 0;
-
-std::cout << "FIFO count before clearing: "
-          << siggen->get_measurement_fifo_count(port)
-          << std::endl;
-
-uhd::rfnoc::pulse_info old_pulse;
-
-size_t cleared_count = 0;
-
-while (siggen->pop_measurement_fifo(old_pulse, port)) {
-    ++cleared_count;
-}
-
-std::cout << "Discarded " << cleared_count
-          << " old measurements" << std::endl;
-
-std::cout << "FIFO count after clearing: "
-          << siggen->get_measurement_fifo_count(port)
-          << std::endl;
           
           
 // --- Configure radios as you already do (rates, freqs, gains, etc.) ---
@@ -474,7 +536,7 @@ std::cout << "avg_start_delay = "
         }
         auto mb = graph->get_mb_controller(rx_mb_idx);
         mb->set_time_source("gpsdo");
-        synchronize_timekeeper_to_gps(mb);
+        // GPS/PPS synchronization is performed after configuring the sample rate.
     }
 
     // set the sample rate
@@ -487,6 +549,22 @@ std::cout << "avg_start_delay = "
         std::cout << boost::format("Actual RX Rate: %f Msps...") % (rate / 1e6)
                   << std::endl
                   << std::endl;
+    }
+
+    // Synchronize only after the final RX rate has been applied.
+    // Changing the rate after programming GPS time can reinterpret existing ticks.
+    if (enable_gps) {
+        auto mb = graph->get_mb_controller(rx_mb_idx);
+        synchronize_timekeeper_to_gps(mb);
+
+        const double device_utc = mb->get_timekeeper(0)->get_time_now().get_real_secs();
+        const double gps_utc = static_cast<double>(mb->get_sensor("gps_time").to_int());
+        std::cout << "[GPS-SYNC] Post-rate device UTC=" << std::fixed
+                  << std::setprecision(3) << device_utc
+                  << " GPS UTC=" << std::setprecision(0) << gps_utc << std::endl;
+        if (std::fabs(device_utc - gps_utc) > 2.0) {
+            throw std::runtime_error("GPS UTC mismatch after RX rate configuration");
+        }
     }
 
     // set the center frequency
@@ -596,6 +674,8 @@ std::cout << "avg_start_delay = "
     }
 
     siggen->set_enable(true, port);
+    
+    
 
     // Start streaming
     uhd::stream_cmd_t stream_cmd((total_num_samps == 0)
@@ -607,6 +687,19 @@ std::cout << "avg_start_delay = "
         graph->get_mb_controller(rx_mb_idx)->get_timekeeper(0)->get_time_now()
         + setup_time;
     std::cout << "Issuing start stream cmd..." << std::endl;
+    
+    auto tk_debug = graph->get_mb_controller(rx_mb_idx)->get_timekeeper(0);
+
+std::cout << "\n[TIMEKEEPER DEBUG]\n"
+          << "Timekeeper tick rate = "
+          << tk_debug->get_tick_rate() << "\n"
+          << "Timekeeper seconds   = "
+          << tk_debug->get_time_now().get_real_secs() << "\n"
+          << "Radio seconds        = "
+          << rx_radio_ctrl->get_time_now().get_real_secs()
+          << std::endl;
+          
+          
     rx_radio_ctrl->issue_stream_cmd(stream_cmd, rx_chan);
     std::cout << "Wait..." << std::endl;
 
@@ -674,262 +767,235 @@ if (save_data) {
     << std::endl;
 }
 
-uint16_t last_sequence = 0;
-double last_pulse_time_seconds = 0.0;
-bool first_measurement = true;
-
-
-// Tick rate of the radio timekeeper, which may differ from RX sample rate.
+// Receive measurement records over the RFNoC output-1 data stream.
+// GPS formatting and disk I/O remain on the existing worker thread.
 const double tick_rate = graph->get_mb_controller(rx_mb_idx)
     ->get_timekeeper(0)->get_tick_rate();
-if (tick_rate <= 0.0) {
-    throw std::runtime_error("Invalid USRP timekeeper tick rate");
-}
+if (tick_rate <= 0.0) throw std::runtime_error("Invalid USRP timekeeper tick rate");
 std::cout << "USRP tick rate: " << tick_rate << " Hz\n";
 std::cout << "Recorded timestamp_us is "
           << (enable_gps ? "GPS-aligned Unix UTC" : "UNSYNCHRONIZED device time")
           << " (microseconds).\n";
 
-try
-{
-    while (!stop_signal_called)
-    {
-        uhd::rfnoc::pulse_info pulse;
+constexpr size_t QUEUE_LIMIT = 16384;
+std::deque<uhd::rfnoc::pulse_info> pulse_queue;
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+bool acquisition_finished = false;
+std::atomic<bool> worker_failed{false};
+std::atomic<uint64_t> processed{0};
+std::atomic<uint64_t> invalid_timestamps{0};
+std::atomic<uint64_t> host_queue_drops{0};
+std::atomic<uint64_t> acquired{0};
+std::atomic<uint64_t> missing_sequences{0};
+std::atomic<size_t> max_queue_depth{0};
+uint16_t previous_seq = 0;
+bool have_previous_seq = false;
+uint64_t rx_errors = 0;
+uint64_t partial_words = 0;
+std::array<uint32_t, 5> pending_words{};
+size_t pending_count = 0;
+bool first_record = true;
+auto last_report = std::chrono::steady_clock::now();
 
-        if (!siggen->pop_measurement_fifo(
-                pulse,
-                port))
-        {
-            std::this_thread::sleep_for(
-                std::chrono::microseconds(100));
-
-            continue;
+std::thread processing_thread([&]() {
+    int64_t previous_timestamp_us = 0;
+    bool have_previous_timestamp = false;
+    try {
+        std::vector<MeasurementRecord> local_buffer;
+        local_buffer.reserve(512);
+        for (;;) {
+            uhd::rfnoc::pulse_info pulse;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_cv.wait(lock, [&] { return acquisition_finished || !pulse_queue.empty(); });
+                if (pulse_queue.empty() && acquisition_finished) break;
+                pulse = pulse_queue.front();
+                pulse_queue.pop_front();
+            }
+            if (!pulse.has_time) {
+                ++invalid_timestamps;
+                continue;
+            }
+            const double pulse_seconds = pulse.trigger_time_seconds(tick_rate, rate);
+            const int64_t timestamp_us =
+                static_cast<int64_t>(std::llround(pulse_seconds * 1e6));
+            const int64_t pri_us = have_previous_timestamp
+                ? timestamp_us - previous_timestamp_us : 0;
+            previous_timestamp_us = timestamp_us;
+            have_previous_timestamp = true;
+            const double amp = pulse.avg_power > 0
+                ? std::sqrt(static_cast<double>(pulse.avg_power)) : 0.0;
+            const double dbfs = amp > 0.0
+                ? 20.0 * std::log10(amp / 32767.0) : -200.0;
+            if (save_data) {
+                MeasurementRecord record{};
+                record.timestamp_us = timestamp_us;
+                const gps_data_t gps = get_latest_gps_data();
+                const auto& gps_time = std::get<0>(gps);
+                if (gps_time != "No GPS Time")
+                    std::strncpy(record.gps_time, gps_time.c_str(), sizeof(record.gps_time) - 1);
+                record.latitude = 999.0;
+                record.longitude = 999.0;
+                record.altitude = 99999.0;
+                try {
+                    if (std::get<1>(gps) != "No Latitude") record.latitude = std::stod(std::get<1>(gps));
+                    if (std::get<2>(gps) != "No Longitude") record.longitude = std::stod(std::get<2>(gps));
+                    if (std::get<3>(gps) != "No Altitude") record.altitude = std::stod(std::get<3>(gps));
+                } catch (const std::exception&) {
+                    record.latitude = 999.0;
+                    record.longitude = 999.0;
+                    record.altitude = 99999.0;
+                }
+                record.amplitude_dbm = dbfs; // Binary format remains dBFS for existing parser compatibility.
+                local_buffer.push_back(record);
+                if (local_buffer.size() >= 512) {
+                    binary_file.write(reinterpret_cast<const char*>(local_buffer.data()),
+                                      local_buffer.size() * sizeof(MeasurementRecord));
+                    if (!binary_file) throw std::runtime_error("Binary file write failed");
+                    local_buffer.clear();
+                }
+            }
+            const uint64_t count = ++processed;
+            // One flushed telemetry line per 50 pulses (plus the first pulse).
+            // Tkinter reads these lines from stdout to update live metrics.
+            if (count == 1 || count % 50 == 0) {
+                std::cout << "[PULSE] COUNT=" << count
+                          << " SEQ=" << pulse.sequence
+                          << " RX_dBm=" << std::fixed << std::setprecision(2)
+                          << (dbfs + dbm_offset)
+                          << " PRI_US=" << pri_us
+                          << std::endl;
+            }
         }
-
-        // CHDR timestamp is in device ticks; sample_offset is in RX samples.
-        // Never treat the legacy sample_index as an absolute sample counter.
-        if (!pulse.has_time) {
-            std::cerr << "Skipping measurement without CHDR timestamp, seq="
-                      << pulse.sequence << std::endl;
-            continue;
+        if (save_data && !local_buffer.empty()) {
+            binary_file.write(reinterpret_cast<const char*>(local_buffer.data()),
+                              local_buffer.size() * sizeof(MeasurementRecord));
+            if (!binary_file) throw std::runtime_error("Final binary file write failed");
         }
-        const double pulse_time_seconds =
-            pulse.trigger_time_seconds(tick_rate, rate);
-
-        // -------------------------------------------------
-        // RX amplitude / dBFS
-        // -------------------------------------------------
-
-        const double rx_amp =
-            (pulse.avg_power > 0)
-                ? std::sqrt(
-                      static_cast<double>(
-                          pulse.avg_power))
-                : 0.0;
-
-        const double rx_dbfs =
-            (rx_amp > 0.0)
-                ? 20.0 * std::log10(
-                      rx_amp / 32767.0)
-                : -200.0;
-
-        // -------------------------------------------------
-        // PRI
-        // -------------------------------------------------
-
-        uint16_t sequence_delta = 0;
-        double delta_seconds = 0.0;
-        if (!first_measurement) {
-            sequence_delta = static_cast<uint16_t>(pulse.sequence - last_sequence);
-            delta_seconds = pulse_time_seconds - last_pulse_time_seconds;
-        }
-
-        std::cout << "SEQ=" << pulse.sequence
-                  << " PACKET_TICKS=" << pulse.packet_timestamp
-                  << " OFFSET=" << pulse.sample_offset
-                  << " DEVICE_TIME_S=" << std::fixed
-                  << std::setprecision(9) << pulse_time_seconds;
-
-        if (!first_measurement) {
-            const double pri_seconds = sequence_delta > 0
-                ? delta_seconds / sequence_delta : 0.0;
-            const uint16_t missed = sequence_delta > 0
-                ? sequence_delta - 1 : 0;
-            std::cout << " DELTA_S=" << delta_seconds
-                      << " PRI_US=" << pri_seconds * 1e6
-                      << " SEQ_DELTA=" << sequence_delta
-                      << " MISSED=" << missed;
-        }
-
-        std::cout
-            << " RX_dBFS="
-            << std::setprecision(2)
-            << rx_dbfs
-            << std::endl;
-
-
- // -------------------------------------------------
-// Save measurement
-// -------------------------------------------------
-
-if (save_data)
-{
-    // When --gps is enabled, GPS/PPS synchronization was verified before RX.
-    // Otherwise this remains unsynchronized USRP device time.
-    const int64_t timestamp_us = static_cast<int64_t>(
-        std::llround(pulse_time_seconds * 1e6));
-
-    // -------------------------------------------------
-    // GPS
-    // -------------------------------------------------
-
-    const gps_data_t gps = get_latest_gps_data();
-
-    const std::string gps_time_str = std::get<0>(gps);
-    const std::string lat_str      = std::get<1>(gps);
-    const std::string lon_str      = std::get<2>(gps);
-    const std::string alt_str      = std::get<3>(gps);
-
-    double latitude  = 999.0;
-    double longitude = 999.0;
-    double altitude  = 99999.0;
-
-    try
-    {
-        if (lat_str != "No Latitude")
-            latitude = std::stod(lat_str);
-
-        if (lon_str != "No Longitude")
-            longitude = std::stod(lon_str);
-
-        if (alt_str != "No Altitude")
-            altitude = std::stod(alt_str);
+    } catch (const std::exception& e) {
+        std::cerr << "[WORKER] " << e.what() << std::endl;
+        worker_failed.store(true);
     }
-    catch (...)
-    {
-        latitude  = 999.0;
-        longitude = 999.0;
-        altitude  = 99999.0;
-    }
+});
 
-
-    // -------------------------------------------------
-    // Create binary record
-    // -------------------------------------------------
-
-    MeasurementRecord record{};
-
-    record.timestamp_us = timestamp_us;
-
-    std::memset(
-        record.gps_time,
-        0,
-        sizeof(record.gps_time));
-
-    if (gps_time_str != "No GPS Time")
-    {
-        std::strncpy(
-            record.gps_time,
-            gps_time_str.c_str(),
-            sizeof(record.gps_time) - 1);
-    }
-
-    record.latitude  = latitude;
-    record.longitude = longitude;
-    record.altitude  = altitude;
-
-    // This is currently dBFS.
-    // We can calibrate to dBm later.
-    record.amplitude_dbm = rx_dbfs;
-
-
-    // GPS fix is the latest recent TPV fix, NOT necessarily at pulse time.
-    // Print the GPS UTC fix separately from device pulse time.
-    std::cout << " GPS_FIX_UTC=" << gps_time_str
-              << " LAT=" << latitude
-              << " LON=" << longitude
-              << " ALT=" << altitude << std::endl;
-
-    // -------------------------------------------------
-    // Buffer measurement
-    // -------------------------------------------------
-
-    write_buffer.push_back(record);
-
-    if (write_buffer.size() >= 512)
-    {
-        binary_file.write(
-            reinterpret_cast<const char*>(
-                write_buffer.data()),
-            write_buffer.size()
-                * sizeof(MeasurementRecord));
-
-        if (!binary_file.good())
-        {
-            std::cerr
-                << "Error writing measurement file"
-                << std::endl;
-
-            stop_signal_called = true;
+try {
+    std::vector<std::complex<int16_t>> meas_buffer(1024);
+    uhd::rx_metadata_t meas_md;
+    const auto acquisition_start = std::chrono::steady_clock::now();
+    while (!stop_signal_called && !worker_failed.load()) {
+        if (total_time > 0.0 &&
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - acquisition_start).count() >= total_time) {
             break;
         }
 
-        write_buffer.clear();
+        const size_t received = meas_streamer->recv(
+            meas_buffer.data(), meas_buffer.size(), meas_md, 0.25);
+
+        if (meas_md.error_code == uhd::rx_metadata_t::ERROR_CODE_TIMEOUT) {
+            continue;
+        }
+        if (meas_md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+            ++rx_errors;
+            std::cerr << "[MEAS] RX error: " << meas_md.strerror() << std::endl;
+            // Lost words can destroy record alignment; stop rather than
+            // silently decode corrupted measurements.
+            throw std::runtime_error("Measurement stream error; record alignment lost");
+        }
+
+        for (size_t i = 0; i < received; ++i) {
+            pending_words[pending_count++] = unpack_measurement_word(meas_buffer[i]);
+            if (pending_count != pending_words.size()) continue;
+            pending_count = 0;
+
+            if (first_record) {
+                first_record = false;
+                std::cout << "[MEAS] First raw record:";
+                for (const auto word : pending_words) {
+                    std::cout << " 0x" << std::hex << std::setw(8)
+                              << std::setfill('0') << word << std::dec;
+                }
+                std::cout << std::setfill(' ') << std::endl;
+            }
+
+            const auto pulse = decode_measurement(pending_words);
+            static bool first_timestamp_printed = false;
+
+if (!first_timestamp_printed) {
+    first_timestamp_printed = true;
+
+    std::cout << "\n[TIMESTAMP DEBUG]\n"
+              << "packet_timestamp = " << pulse.packet_timestamp << "\n"
+              << "sample_offset    = " << pulse.sample_offset << "\n"
+              << "has_time         = " << pulse.has_time << "\n"
+              << "tick_rate        = " << tick_rate << "\n"
+              << "rx_sample_rate   = " << rate << "\n"
+              << "trigger_seconds  = "
+              << pulse.trigger_time_seconds(tick_rate, rate)
+              << std::endl;
+}
+            ++acquired;
+            if (have_previous_seq) {
+                const uint16_t delta = static_cast<uint16_t>(pulse.sequence - previous_seq);
+                if (delta > 1) missing_sequences += static_cast<uint64_t>(delta - 1);
+            }
+            previous_seq = pulse.sequence;
+            have_previous_seq = true;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                if (pulse_queue.size() >= QUEUE_LIMIT) {
+                    ++host_queue_drops;
+                } else {
+                    pulse_queue.push_back(pulse);
+                    max_queue_depth.store(std::max(max_queue_depth.load(), pulse_queue.size()));
+                    queue_cv.notify_one();
+                }
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_report >= std::chrono::seconds(1)) {
+            size_t queue_depth = 0;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                queue_depth = pulse_queue.size();
+            }
+            std::cout << "[STATUS] acquired=" << acquired.load()
+                      << " processed=" << processed.load()
+                      << " missing_seq=" << missing_sequences.load()
+                      << " queue=" << queue_depth
+                      << " queue_max=" << max_queue_depth.load()
+                      << " queue_drops=" << host_queue_drops.load()
+                      << " invalid_time=" << invalid_timestamps.load()
+                      << " rx_errors=" << rx_errors
+                      << std::endl;
+            last_report = now;
+        }
     }
+    partial_words = pending_count;
+} catch (const std::exception& e) {
+    std::cerr << "[ACQUISITION] " << e.what() << std::endl;
+    worker_failed.store(true);
 }
-
-        // -------------------------------------------------
-        // Update previous pulse
-        // -------------------------------------------------
-
-        last_sequence =
-            pulse.sequence;
-
-        last_pulse_time_seconds = pulse_time_seconds;
-
-        first_measurement = false;
-    }
-}
-catch (const std::exception& ex)
 {
-    std::cerr
-        << "\nMeasurement FIFO exception: "
-        << ex.what()
-        << std::endl;
-
-    stop_signal_called = true;
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    acquisition_finished = true;
 }
-catch (...)
-{
-    std::cerr
-        << "\nUnknown exception in measurement FIFO loop"
-        << std::endl;
-
-    stop_signal_called = true;
-}
-
-if (save_data && !write_buffer.empty())
-{
-    binary_file.write(
-        reinterpret_cast<const char*>(
-            write_buffer.data()),
-        write_buffer.size() *
-            sizeof(MeasurementRecord));
-
-    if (!binary_file.good())
-    {
-        std::cerr
-            << "Error writing final measurement data"
-            << std::endl;
-    }
-
-    write_buffer.clear();
-}
-
-
-
+queue_cv.notify_all();
+processing_thread.join();
+std::cout << "[STATUS] FINAL acquired=" << acquired.load()
+          << " processed=" << processed.load()
+          << " missing_seq=" << missing_sequences.load()
+          << " invalid_time=" << invalid_timestamps.load()
+          << " queue_drops=" << host_queue_drops.load()
+          << " queue_max=" << max_queue_depth.load()
+          << " partial_words=" << partial_words
+          << " rx_errors=" << rx_errors << std::endl;
+if (worker_failed.load()) std::cerr << "[ERROR] Acquisition or worker failed" << std::endl;
 
     // Stop radio
+    siggen->set_enable(false, port);
     stream_cmd.stream_mode = uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS;
     std::cout << "Issuing stop stream cmd..." << std::endl;
     rx_radio_ctrl->issue_stream_cmd(

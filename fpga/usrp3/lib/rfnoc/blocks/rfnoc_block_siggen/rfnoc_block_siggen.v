@@ -23,7 +23,7 @@
 //   CHDR_W      : AXIS-CHDR data bus width
 //   MTU         : Maximum transmission unit (i.e., maximum packet size in
 //                 CHDR words is 2**MTU).
-//   NUM_PORTS   : Number of siggen cores to instantiate.
+// NUM_PORTS : Number of RFNoC output streams (must be 2).
 //
 
 `default_nettype none
@@ -33,7 +33,7 @@ module rfnoc_block_siggen #(
   parameter [9:0] THIS_PORTID = 10  'd0,
   parameter       CHDR_W      = 64,
   parameter [5:0] MTU         = 10,
-  parameter       NUM_PORTS   = 1
+  parameter       NUM_PORTS   = 2
 ) (
   // RFNoC Framework Clocks and Resets
   input  wire                        rfnoc_chdr_clk,
@@ -79,17 +79,17 @@ module rfnoc_block_siggen #(
   wire        m_ctrlport_resp_ack;
   wire [31:0] m_ctrlport_resp_data;
   
-    // Data Stream from User Logic: in
-  wire [NUM_PORTS*32*1-1:0] s_in_axis_tdata;
-  wire [     NUM_PORTS-1:0] s_in_axis_tlast;
-  wire [     NUM_PORTS-1:0] s_in_axis_tvalid;
-  wire [     NUM_PORTS-1:0] s_in_axis_tready;
-  wire [  NUM_PORTS*16-1:0] s_in_axis_tlength;
-  wire [  NUM_PORTS*64-1:0] s_in_axis_ttimestamp;
-  wire [     NUM_PORTS-1:0] s_in_axis_thas_time;
-  wire [NUM_PORTS*1-1:0]      s_in_axis_tkeep;
-  wire [NUM_PORTS   -1:0] s_in_axis_teov;
-  wire [NUM_PORTS   -1:0] s_in_axis_teob; 
+// One input stream for RX trigger detection
+wire [31:0] s_in_axis_tdata;
+wire        s_in_axis_tlast;
+wire        s_in_axis_tvalid;
+wire        s_in_axis_tready;
+wire [15:0] s_in_axis_tlength;
+wire [63:0] s_in_axis_ttimestamp;
+wire        s_in_axis_thas_time;
+wire        s_in_axis_tkeep;
+wire        s_in_axis_teov;
+wire        s_in_axis_teob;
 
   // Data Stream to User Logic: out
   wire [NUM_PORTS*32*1-1:0] s_out_axis_tdata;
@@ -207,15 +207,15 @@ wire axis_data_clk_s, axis_data_rst_s;
 
   // Create a CtrlPort bus for each port instance
 
-  wire [ 1*NUM_PORTS-1:0] ctrlport_req_wr;
-  wire [ 1*NUM_PORTS-1:0] ctrlport_req_rd;
-  wire [20*NUM_PORTS-1:0] ctrlport_req_addr;
-  wire [32*NUM_PORTS-1:0] ctrlport_req_data;
-  wire [ 1*NUM_PORTS-1:0] ctrlport_resp_ack;
-  wire [32*NUM_PORTS-1:0] ctrlport_resp_data;
+wire        ctrlport_req_wr;
+wire        ctrlport_req_rd;
+wire [19:0] ctrlport_req_addr;
+wire [31:0] ctrlport_req_data;
+wire        ctrlport_resp_ack;
+wire [31:0] ctrlport_resp_data;
 
   ctrlport_decoder #(
-    .NUM_SLAVES   (NUM_PORTS),
+    .NUM_SLAVES   (1),
     .BASE_ADDR    (0),
     .SLAVE_ADDR_W (SIGGEN_ADDR_W)
   ) ctrlport_decoder_i (
@@ -239,7 +239,7 @@ wire axis_data_clk_s, axis_data_rst_s;
     .m_ctrlport_req_has_time (),
     .m_ctrlport_req_time     (),
     .m_ctrlport_resp_ack     (ctrlport_resp_ack),
-    .m_ctrlport_resp_status  ({NUM_PORTS{2'b0}}),
+    .m_ctrlport_resp_status  (2'b00),
     .m_ctrlport_resp_data    (ctrlport_resp_data)
   );
 
@@ -248,39 +248,51 @@ wire axis_data_clk_s, axis_data_rst_s;
   // Port Instances
   //---------------------------------------------------------------------------
 
-  genvar port;
-  generate
-    for (port = 0; port < NUM_PORTS; port = port+1) begin : gen_ports
 
-      rfnoc_siggen_core rfnoc_siggen_core_i (
-        .clk                  (ce_clk),
-        .rst                  (ce_rst),
-        .s_ctrlport_req_wr    (ctrlport_req_wr    [port* 1 +:  1]),
-        .s_ctrlport_req_rd    (ctrlport_req_rd    [port* 1 +:  1]),
-        .s_ctrlport_req_addr  (ctrlport_req_addr  [port*20 +: 20]),
-        .s_ctrlport_req_data  (ctrlport_req_data  [port*32 +: 32]),
-        .s_ctrlport_resp_ack  (ctrlport_resp_ack  [port* 1 +:  1]),
-        .s_ctrlport_resp_data (ctrlport_resp_data [port*32 +: 32]),
-        
-              // NEW: input stream into the core
-        .s_tdata              (s_in_axis_tdata    [port*32 +: 32]),
-        .s_tvalid             (s_in_axis_tvalid   [port*1  +: 1 ]),
-        .s_tlast              (s_in_axis_tlast    [port*1  +: 1 ]),
-        .s_tready             (s_in_axis_tready   [port*1  +: 1 ]),
-        .s_tlength            (s_in_axis_tlength  [port*16 +: 16]),
-        
-        .m_tdata              (s_out_axis_tdata   [port*32 +: 32]),
-        .m_tlast              (s_out_axis_tlast   [port* 1 +:  1]),
-        .m_tvalid             (s_out_axis_tvalid  [port* 1 +:  1]),
-        .m_tready             (s_out_axis_tready  [port* 1 +:  1]),
-        .m_tlength            (s_out_axis_tlength [port*16 +: 16]),
-          // timestamp addition 
-        .s_ttimestamp (s_in_axis_ttimestamp[port*64 +: 64]),
-        .s_thas_time (s_in_axis_thas_time[port])
-      );
 
-    end
-  endgenerate
+      // One SigGen core, two independent output streams
+rfnoc_siggen_core rfnoc_siggen_core_i (
+    .clk                  (ce_clk),
+    .rst                  (ce_rst),
+
+    // ControlPort
+    .s_ctrlport_req_wr    (ctrlport_req_wr),
+    .s_ctrlport_req_rd    (ctrlport_req_rd),
+    .s_ctrlport_req_addr  (ctrlport_req_addr),
+    .s_ctrlport_req_data  (ctrlport_req_data),
+    .s_ctrlport_resp_ack  (ctrlport_resp_ack),
+    .s_ctrlport_resp_data (ctrlport_resp_data),
+
+    // RX input
+    .s_tdata              (s_in_axis_tdata),
+    .s_tvalid             (s_in_axis_tvalid),
+    .s_tlast              (s_in_axis_tlast),
+    .s_tready             (s_in_axis_tready),
+    .s_tlength            (s_in_axis_tlength),
+    .s_ttimestamp         (s_in_axis_ttimestamp),
+    .s_thas_time          (s_in_axis_thas_time),
+
+    // Output 0: existing TX waveform
+    .m_tdata              (s_out_axis_tdata[0 +: 32]),
+    .m_tlast              (s_out_axis_tlast[0]),
+    .m_tvalid             (s_out_axis_tvalid[0]),
+    .m_tready             (s_out_axis_tready[0]),
+    .m_tlength            (s_out_axis_tlength[0 +: 16]),
+
+    // Output 1: measurement stream
+    .meas_tdata           (s_out_axis_tdata[32 +: 32]),
+    .meas_tlast           (s_out_axis_tlast[1]),
+    .meas_tvalid          (s_out_axis_tvalid[1]),
+    .meas_tready          (s_out_axis_tready[1]),
+    .meas_tlength         (s_out_axis_tlength[16 +: 16])
+);
+
+// No CHDR timestamps on the output packets.
+// Measurement timestamps are embedded in the payload.
+assign s_out_axis_ttimestamp = 128'd0;
+assign s_out_axis_thas_time  = 2'b00;
+
+
 
 endmodule // rfnoc_block_siggen
 

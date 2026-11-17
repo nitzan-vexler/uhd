@@ -242,66 +242,67 @@ bool get_measurement_fifo_overflow(
 
     return (value & 0x1) != 0;
 }
+
 bool pop_measurement_fifo(
     pulse_info& result,
     const size_t port = 0) override
 {
-    // Is there anything stored?
-    const uint32_t count =
-        _siggen_reg_iface.peek32(
-            REG_MEAS_FIFO_COUNT_OFFSET,
-            port);
-
-    if (count == 0) {
-        return false;
-    }
-
-    // Check that the BRAM read/prefetch has completed.
+    // VALID is directly connected to !meas_fifo_empty.
     const uint32_t valid =
         _siggen_reg_iface.peek32(
-            REG_MEAS_FIFO_VALID_OFFSET,
-            port);
+            REG_MEAS_FIFO_VALID_OFFSET, port);
 
-    if ((valid & 0x1) == 0) {
+    if ((valid & 0x1u) == 0) {
         return false;
     }
 
-    // Read the current FWFT entry. Reads do not pop the FIFO.
+    // Read the current FIFO entry.
     const uint32_t meta =
-        _siggen_reg_iface.peek32(REG_MEAS_FIFO_META_OFFSET, port);
-    const uint32_t time_lo =
-        _siggen_reg_iface.peek32(REG_MEAS_FIFO_TIME_LO_OFFSET, port);
-    const uint32_t time_hi =
-        _siggen_reg_iface.peek32(REG_MEAS_FIFO_TIME_HI_OFFSET, port);
-    const uint32_t offset =
-        _siggen_reg_iface.peek32(REG_MEAS_FIFO_OFFSET_OFFSET, port);
-    const uint32_t status =
-        _siggen_reg_iface.peek32(REG_MEAS_FIFO_STATUS_OFFSET, port);
-    const uint32_t avg_power =
-        _siggen_reg_iface.peek32(REG_MEAS_FIFO_AVG_POWER_OFFSET, port);
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_META_OFFSET, port);
 
-    // FIFO layout: [159:128] power, [127:112] sequence,
-    // [111:48] packet timestamp, [47:16] sample offset, [15:0] status.
-    result.sequence = static_cast<uint16_t>(meta >> 16);
+    const uint32_t time_lo =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_TIME_LO_OFFSET, port);
+
+    const uint32_t time_hi =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_TIME_HI_OFFSET, port);
+
+    const uint32_t offset =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_OFFSET_OFFSET, port);
+
+    const uint32_t avg_power =
+        _siggen_reg_iface.peek32(
+            REG_MEAS_FIFO_AVG_POWER_OFFSET, port);
+
+    // Reconstruct measurement metadata.
+    result.sequence =
+        static_cast<uint16_t>(meta >> 16);
+
     result.packet_timestamp =
         (uint64_t(time_hi & 0xFFFFu) << 48)
         | (uint64_t(meta & 0xFFFFu) << 32)
         | uint64_t(time_lo);
-    result.sample_offset = offset;
-    result.has_time = (status & 0x1u) != 0;
-    result.avg_power = avg_power;
-    // Compatibility only: old clients must not interpret this as
-    // an absolute sample counter.
-    result.sample_index = result.packet_timestamp & 0x0000FFFFFFFFFFFFULL;
 
-    // Explicitly remove this entry from the FIFO.
+    result.sample_offset = offset;
+    result.avg_power = avg_power;
+
+    // Fast-mode assumption: RX packets have valid timestamps.
+    // The per-record STATUS bit is not checked in this mode.
+    result.has_time = true;
+
+    result.sample_index =
+        result.packet_timestamp & 0x0000FFFFFFFFFFFFULL;
+
+    // Remove the current entry.
     _siggen_reg_iface.poke32(
-        REG_MEAS_FIFO_POP_OFFSET,
-        1,
-        port);
+        REG_MEAS_FIFO_POP_OFFSET, 1, port);
 
     return true;
 }
+
 
 bool get_latest_pulse_measurement(
     pulse_info& result,
@@ -358,7 +359,9 @@ bool get_latest_pulse_measurement(
 private:
     void _register_props()
     {
-        const size_t num_outputs = get_num_output_ports();
+// Only output 0 uses the SigGen register-backed controls.
+// Output 1 carries measurement records.
+const size_t num_outputs = 1;
         _prop_enable.reserve(num_outputs);
         _prop_waveform.reserve(num_outputs);
         _prop_amplitude.reserve(num_outputs);
@@ -366,7 +369,7 @@ private:
         _prop_constant_q.reserve(num_outputs);
         _prop_phase_inc.reserve(num_outputs);
         _prop_spp.reserve(num_outputs);
-        _prop_type_out.reserve(num_outputs);
+_prop_type_out.reserve(get_num_output_ports());
 _prop_threshold.reserve(num_outputs);
 _prop_pulsewidth.reserve(num_outputs);
 _prop_delay.reserve(num_outputs);
@@ -569,12 +572,23 @@ register_property(&_prop_avg_start_delay.back(), [this, port]() {
                     _prop_spp.at(port).set(spp);
                 });
 
-            // add resolver for type
             add_property_resolver({&_prop_type_out.back()},
                 {&_prop_type_out.back()},
-                [this, port]() { _prop_type_out.at(port).set(IO_TYPE_SC16); });
-        }
-    }
+                [this, port]() {
+                    _prop_type_out.at(port).set(IO_TYPE_SC16);
+                });
+        } // End of port 0 loop
+
+        // Output 1: Measurement stream
+        _prop_type_out.emplace_back(property_t<std::string>{
+            PROP_KEY_TYPE,
+            IO_TYPE_SC16,
+            {res_source_info::OUTPUT_EDGE, 1}
+        });
+
+        register_property(&_prop_type_out.back());
+
+    } // End of _register_props()
 
     void _set_constant_register(const size_t port)
     {

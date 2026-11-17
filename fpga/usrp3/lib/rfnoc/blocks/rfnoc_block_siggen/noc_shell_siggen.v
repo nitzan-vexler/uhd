@@ -25,7 +25,7 @@ module noc_shell_siggen #(
   parameter [9:0] THIS_PORTID     = 10'd0,
   parameter       CHDR_W          = 64,
   parameter [5:0] MTU             = 10,
-  parameter       NUM_PORTS       = 1
+  parameter       NUM_PORTS       = 2
 ) (
   //---------------------
   // Framework Interface
@@ -87,17 +87,19 @@ module noc_shell_siggen #(
   output wire               axis_data_rst,
   
     
-   // Data Stream to User Logic: in
-  output  wire [NUM_PORTS*32*1-1:0]   s_in_axis_tdata,
-  output  wire [NUM_PORTS*1-1:0]      s_in_axis_tkeep,
-  output  wire [NUM_PORTS-1:0]        s_in_axis_tlast,
-  output  wire [NUM_PORTS-1:0]        s_in_axis_tvalid,
-  input wire [NUM_PORTS-1:0]        s_in_axis_tready,
-  output  wire [NUM_PORTS*64-1:0]     s_in_axis_ttimestamp,
-  output  wire [NUM_PORTS-1:0]        s_in_axis_thas_time,
-  output  wire [NUM_PORTS*16-1:0]     s_in_axis_tlength,
-  output  wire [NUM_PORTS-1:0]        s_in_axis_teov,
-  output  wire [NUM_PORTS-1:0]        s_in_axis_teob,
+// ------------------------------------------------------------
+// One RX input stream (independent of NUM_PORTS)
+// ------------------------------------------------------------
+output wire [31:0] s_in_axis_tdata,
+output wire        s_in_axis_tkeep,
+output wire        s_in_axis_tlast,
+output wire        s_in_axis_tvalid,
+input  wire        s_in_axis_tready,
+output wire [63:0] s_in_axis_ttimestamp,
+output wire        s_in_axis_thas_time,
+output wire [15:0] s_in_axis_tlength,
+output wire        s_in_axis_teov,
+output wire        s_in_axis_teob,
 
 
   // Data Stream from User Logic: out
@@ -255,19 +257,17 @@ chdr_to_axis_data #(
   .s_axis_chdr_tvalid(s_rfnoc_chdr_tvalid[0]),
   .s_axis_chdr_tready(s_rfnoc_chdr_tready[0]),
 
-  // AXIS into your core
-  .m_axis_tdata      (s_in_axis_tdata     [32*1*0 +: 32*1]),
-  .m_axis_tkeep      (s_in_axis_tkeep     [1*0 +: 1]),
-  .m_axis_tlast      (s_in_axis_tlast     [0]),
-  .m_axis_tvalid     (s_in_axis_tvalid    [0]),
-  .m_axis_tready     (s_in_axis_tready    [0]),
+.m_axis_tdata      (s_in_axis_tdata),
+.m_axis_tkeep      (s_in_axis_tkeep),
+.m_axis_tlast      (s_in_axis_tlast),
+.m_axis_tvalid     (s_in_axis_tvalid),
+.m_axis_tready     (s_in_axis_tready),
 
-  // sideband to your core
-  .m_axis_ttimestamp (s_in_axis_ttimestamp[64*0 +: 64]),
-  .m_axis_thas_time  (s_in_axis_thas_time [0]),
-  .m_axis_tlength    (s_in_axis_tlength   [16*0 +: 16]),
-  .m_axis_teov       (s_in_axis_teov      [0]),
-  .m_axis_teob       (s_in_axis_teob      [0]),
+.m_axis_ttimestamp (s_in_axis_ttimestamp),
+.m_axis_thas_time  (s_in_axis_thas_time),
+.m_axis_tlength    (s_in_axis_tlength),
+.m_axis_teov       (s_in_axis_teov),
+.m_axis_teob       (s_in_axis_teob),
 
   // flush control from backend
   .flush_en          (data_i_flush_en),

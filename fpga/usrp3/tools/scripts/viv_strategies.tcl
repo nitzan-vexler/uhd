@@ -80,6 +80,23 @@ proc ::vivado_strategies::implement_design {strategy} {
     puts "BUILDER: Running implementation strategy with:"
     vivado_strategies::print_strategy $strategy
 
+    # Diagnostic only: inspect custom SigGen black boxes before opt_design.
+    # Do not load OOC checkpoints until the cell hierarchy is verified.
+    puts "BUILDER: Inspecting SigGen black boxes"
+    if {[catch {get_cells -hierarchical -quiet -filter {IS_BLACKBOX == 1}} siggen_blackboxes]} {
+        puts "BUILDER: Black-box query failed: $siggen_blackboxes"
+    } else {
+        foreach cell $siggen_blackboxes {
+            if {[catch {get_property REF_NAME $cell} ref_name]} {
+                puts "BUILDER: REF_NAME lookup failed for $cell: $ref_name"
+            } else {
+                puts "BLACKBOX: $cell"
+                puts "  REF_NAME: $ref_name"
+            }
+        }
+        puts "BUILDER: Black-box inspection complete"
+    }
+
     # Optimize the current netlist.
     # This will perform the retarget, propconst, sweep and bram_power_opt optimizations by default.
     if [dict get $strategy "opt_design.is_enabled"] {

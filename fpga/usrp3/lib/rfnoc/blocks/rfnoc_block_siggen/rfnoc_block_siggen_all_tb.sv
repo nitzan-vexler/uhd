@@ -16,7 +16,7 @@
 module rfnoc_block_siggen_all_tb;
 
   // Test multiple CHDR widths
-  rfnoc_block_siggen_tb #(.CHDR_W(64),  .NUM_PORTS(1))  test_siggen_0();
+  rfnoc_block_siggen_tb #(.CHDR_W(64),  .NUM_PORTS(2))  test_siggen_0();
   //rfnoc_block_siggen_tb #(.CHDR_W(64),  .NUM_PORTS(2))  test_siggen_1();
   //rfnoc_block_siggen_tb #(.CHDR_W(64),  .NUM_PORTS(3))  test_siggen_2();
   //rfnoc_block_siggen_tb #(.CHDR_W(128), .NUM_PORTS(2))  test_siggen_3();

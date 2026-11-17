@@ -154,6 +154,13 @@ proc ::vivado_utils::synthesize_design {args} {
     set synth_cmd [concat $synth_cmd $vdef_args]
     set synth_cmd [concat $synth_cmd $incdir_args]
     set synth_cmd [concat $synth_cmd $args]
+    # Generate synthesis output products for the custom SigGen FIFO only.
+    set siggen_fifo [get_ips -quiet fifo_generator_0]
+    if {[llength $siggen_fifo] > 0} {
+        puts "BUILDER: Generating SigGen FIFO synthesis products"
+        generate_target synthesis $siggen_fifo
+    }
+
     puts "BUILDER: Synthesizing design"
     eval $synth_cmd
 }
