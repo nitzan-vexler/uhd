@@ -146,7 +146,7 @@ class CombinedGUI:
         self.save=tk.BooleanVar(value=True); self.gps=tk.BooleanVar(value=True)
         ttk.Checkbutton(f,text='Save measurements',variable=self.save).grid(row=0,column=0,columnspan=2,sticky='w')
         ttk.Checkbutton(f,text='GPSD + GPS/PPS UTC sync (--gps)',variable=self.gps).grid(row=1,column=0,columnspan=2,sticky='w')
-        self.v['output']=tk.StringVar(value=os.path.join(WORKDIR,'combined_measurements.dat'))
+        self.v['output'] = tk.StringVar(value=os.path.expanduser('~/SDR_Records/pulse.dat'))
         ttk.Entry(f,textvariable=self.v['output']).grid(row=2,column=0,columnspan=2,sticky='ew')
         ttk.Button(f,text='Choose file',command=lambda:self.pick_save(self.v['output'])).grid(row=3,column=0)
         ttk.Button(f,text='Download E312 file',command=self.download).grid(row=3,column=1)
@@ -287,8 +287,8 @@ class CombinedGUI:
         frame.columnconfigure(0, weight=0)
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(2, weight=0)
-        self.parser_in = tk.StringVar()
-        self.parser_out = tk.StringVar()
+        self.parser_in = tk.StringVar(value=os.path.expanduser('~/SDR_Records/pulse.dat'))
+        self.parser_out = tk.StringVar(value=os.path.expanduser('~/SDR_Records/pulse.csv'))
 
         panel = ttk.LabelFrame(frame, text='Convert Measurements to CSV',
                                padding=20, style='Card.TLabelframe')

@@ -1,0 +1,36 @@
+
+cmake_minimum_required(VERSION 3.10)
+
+project(siggen_e310_recorder LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(siggen_e310_recorder
+    rfnoc_radio_loopback_e310.cpp
+)
+
+set(CUSTOM_UHD "$ENV{HOME}/uhd_e310_siggen_new")
+
+target_include_directories(siggen_e310_recorder PRIVATE
+    "${CUSTOM_UHD}/include"
+)
+
+find_package(Threads REQUIRED)
+find_package(Boost REQUIRED COMPONENTS
+    program_options
+    system
+    thread
+)
+
+target_link_libraries(siggen_e310_recorder PRIVATE
+    "${CUSTOM_UHD}/lib/libuhd.so"
+    Boost::program_options
+    Boost::system
+    Boost::thread
+    Threads::Threads
+)
+
+set_target_properties(siggen_e310_recorder PROPERTIES
+    BUILD_RPATH "${CUSTOM_UHD}/lib"
+)
